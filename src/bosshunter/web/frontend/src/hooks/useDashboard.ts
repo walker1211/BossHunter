@@ -20,6 +20,14 @@ interface Job {
   company: string
   salary: string
   city: string
+  work_location?: string
+  work_schedule?: 'double' | 'alternate' | 'single' | 'unclear' | 'unknown'
+  work_schedule_source?: string
+  work_schedule_evidence?: string
+  commute_origin?: string | null
+  commute_minutes?: number | null
+  commute_mode?: string | null
+  commute_checked_at?: string | null
   experience: string
   education?: string
   recruitment_type?: 'campus' | 'experienced' | 'unknown' | string
@@ -37,6 +45,7 @@ interface Job {
   hr_name: string
   hr_title: string
   hr_active: string
+  hr_active_days?: number | null
   company_size: string
   company_industry: string
   url: string

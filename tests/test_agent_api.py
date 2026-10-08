@@ -38,6 +38,15 @@ class AgentPreferencesTests(unittest.TestCase):
         self.assertNotIn("ai", preferences)
         self.assertNotIn("private-key-must-not-be-exposed", str(preferences))
 
+    def test_agent_preferences_exposes_commute_limit_read_only(self):
+        config = load_config()
+        config["profile"]["commute_origin"] = "宝安客运站"
+        config["profile"]["commute_max_minutes"] = 60
+        preferences = agent_preferences(config)
+        self.assertEqual(preferences["commute"], {"origin": "宝安客运站", "max_minutes": 60})
+        with self.assertRaises(AgentRequestError):
+            apply_preferences(config, {"commute": {"max_minutes": 120}})
+
     def test_credentials_and_delivery_settings_are_rejected(self):
         for patch in (
             {"api_key": "not-allowed"},

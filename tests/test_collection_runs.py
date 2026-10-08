@@ -61,6 +61,26 @@ class CollectionRunAndMigrationTests(TestCase):
         self.assertEqual(repeated_columns, columns)
         self.assertEqual(dict(legacy), {"id": "legacy-boss-1", "source_platform": "boss", "source_job_id": None})
 
+    def test_work_location_is_stored_separately_from_search_city(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "jobs.db"
+            db = get_db(path)
+            insert_job(db, {
+                "id": "with-location", "title": "后端工程师", "company": "示例",
+                "city": "深圳", "work_location": "深圳·宝安区·西乡",
+            })
+            db.close()
+            db = get_db(path)
+            try:
+                row = db.execute(
+                    "SELECT city, work_location FROM jobs WHERE id = 'with-location'"
+                ).fetchone()
+                self.assertEqual(tuple(row), ("深圳", "深圳·宝安区·西乡"))
+                columns = {column[1] for column in db.execute("PRAGMA table_info(jobs)")}
+                self.assertTrue({"commute_origin", "commute_minutes", "commute_mode", "commute_checked_at"} <= columns)
+            finally:
+                db.close()
+
     def test_collection_run_checkpoint_persists_platform_progress_and_restart_stop(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "runs.db"

@@ -489,6 +489,41 @@ class WebApiRouteTests(unittest.TestCase):
         self.assertEqual(trace["final_score"], 87)
         self.assertEqual(entry["action"], "agent_evaluated")
 
+    def test_agent_score_only_keeps_passing_job_out_of_sender(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base_dir = Path(tmp)
+            (base_dir / "config.yaml").write_text(
+                yaml.safe_dump({"scoring": {"threshold": 71}, "throttle": {"daily_limit": 0}}),
+                encoding="utf-8",
+            )
+            server.set_base_dir(base_dir)
+            db = get_db(base_dir / "data" / "bosshunter.db")
+            insert_job(db, _job("score-only"))
+            db.close()
+
+            status, _, body = self._request("/api/agent/evaluations", "POST", {
+                "evaluations": [{"job_id": "score-only", "score": _agent_score()}],
+            })
+            self.assertTrue(status.startswith("200"), body)
+            self.assertEqual(json.loads(body)["result"]["scored"], ["score-only"])
+
+            db = get_db(base_dir / "data" / "bosshunter.db")
+            try:
+                row = db.execute(
+                    "SELECT status, greeting, greeting_original FROM jobs WHERE id = 'score-only'"
+                ).fetchone()
+                self.assertEqual(row["status"], "scored")
+                self.assertIsNone(row["greeting"])
+                self.assertIsNone(row["greeting_original"])
+                self.assertEqual(get_jobs_ready_to_send(db), [])
+                self.assertEqual(get_jobs_ready_to_send(db, include_pending_review=True), [])
+            finally:
+                db.close()
+
+            quota_status, _, quota_body = self._request("/api/workbench")
+            self.assertTrue(quota_status.startswith("200"), quota_body)
+            self.assertEqual(json.loads(quota_body)["send_quota"]["daily_limit"], 0)
+
     def test_agent_task_rejects_unsupported_mode_and_requires_confirmation(self):
         status, _, body = self._request("/api/agent/tasks", "POST", {"mode": "collect"})
         self.assertTrue(status.startswith("400"), body)
@@ -836,6 +871,67 @@ class WebApiRouteTests(unittest.TestCase):
         self.assertIn("application/json", headers["Content-Type"])
         self.assertEqual(json.loads(body), [])
 
+    def test_hr_activity_search_pagination_workbench_and_export_agree(self):
+        import csv
+        with tempfile.TemporaryDirectory() as tmp:
+            server.set_base_dir(Path(tmp))
+            db = get_db(Path(tmp) / "data" / "bosshunter.db")
+            try:
+                for index, activity in enumerate(["刚刚活跃", "3天内活跃", "近7天活跃", "", "近期活跃"]):
+                    job = _job(f"activity-{index}")
+                    job["hr_active"] = activity
+                    insert_job(db, job)
+                    update_job_status(db, job["id"], "ready")
+                    update_job_score(db, job["id"], 80, "fixture")
+            finally:
+                db.close()
+            status, _, body = self._request("/api/jobs/search?hr_active_within=3d&limit=1&offset=1")
+            self.assertTrue(status.startswith("200"), status)
+            payload = json.loads(body)
+            self.assertEqual((payload["total"], payload["all_total"], len(payload["items"])), (2, 5, 1))
+            self.assertIn(payload["items"][0]["hr_active_days"], [0, 3])
+            _, _, unknown = self._request("/api/jobs/search?hr_active_within=unknown")
+            self.assertEqual({row["id"] for row in json.loads(unknown)["items"]}, {"activity-3", "activity-4"})
+            _, _, all_jobs = self._request("/api/jobs/search")
+            self.assertEqual(json.loads(all_jobs)["total"], 5)
+            _, _, workbench = self._request("/api/workbench")
+            pending = json.loads(workbench)["pending_confirmation"]
+            self.assertEqual({row["id"]: row["hr_active_days"] for row in pending}["activity-1"], 3)
+            export_status, headers, content = self._request("/api/jobs/export", "POST", {
+                "format": "csv", "scope": "filtered", "filters": {"hr_active_within": "3d"},
+            })
+            self.assertTrue(export_status.startswith("200"), content)
+            self.assertEqual(headers["X-Exported-Count"], "2")
+            rows = list(csv.DictReader(io.StringIO(content.lstrip("\ufeff"))))
+            self.assertEqual({row["岗位 ID"] for row in rows}, {"activity-0", "activity-1"})
+            for value in ["bad", "-1d", "365d"]:
+                invalid, _, _ = self._request(f"/api/jobs/search?hr_active_within={value}")
+                self.assertTrue(invalid.startswith("400"))
+                invalid, _, _ = self._request("/api/jobs/export", "POST", {
+                    "format": "csv", "scope": "filtered", "filters": {"hr_active_within": value},
+                })
+                self.assertTrue(invalid.startswith("400"))
+
+    def test_hr_activity_config_round_trip_and_invalid_values(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            server.set_base_dir(Path(tmp))
+            status, _, _ = self._request("/api/config", "POST", {"profile": {
+                "hr_active_within_days": 7, "hr_active_keep_unknown": False,
+            }})
+            self.assertTrue(status.startswith("200"), status)
+            status, _, body = self._request("/api/config")
+            self.assertEqual(json.loads(body)["profile"]["hr_active_within_days"], 7)
+            self.assertFalse(json.loads(body)["profile"]["hr_active_keep_unknown"])
+            for profile in [
+                {"hr_active_within_days": -1}, {"hr_active_within_days": 3.5},
+                {"hr_active_within_days": True}, {"hr_active_keep_unknown": "false"},
+            ]:
+                with self.subTest(profile=profile):
+                    status, _, _ = self._request("/api/config", "POST", {"profile": profile})
+                    self.assertTrue(status.startswith("400"))
+            _, _, body = self._request("/api/config")
+            self.assertEqual(json.loads(body)["profile"]["hr_active_within_days"], 7)
+
     def test_job_search_filters_keyword_score_salary_and_status(self):
         with tempfile.TemporaryDirectory() as tmp:
             base_dir = Path(tmp)
@@ -908,6 +1004,26 @@ class WebApiRouteTests(unittest.TestCase):
         payload = json.loads(body)
         self.assertTrue(status.startswith("200"), body)
         self.assertCountEqual([job["id"] for job in payload["items"]], ["zhilian-filtered", "boss-ready"])
+
+    def test_job_search_filters_posting_schedule_claim(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base_dir = Path(tmp)
+            db = get_db(base_dir / "data" / "bosshunter.db")
+            try:
+                claimed = _job("claimed-double")
+                claimed["jd"] = "周末双休，法定节假日休息"
+                insert_job(db, claimed)
+                insert_job(db, _job("not-stated"))
+            finally:
+                db.close()
+            server.set_base_dir(base_dir)
+            status, _, body = self._request("/api/jobs/search?work_schedule=double")
+            invalid_status, _, _ = self._request("/api/jobs/search?work_schedule=verified")
+
+        self.assertTrue(status.startswith("200"), body)
+        self.assertEqual([item["id"] for item in json.loads(body)["items"]], ["claimed-double"])
+        self.assertEqual(json.loads(body)["items"][0]["work_schedule_source"], "job_posting")
+        self.assertTrue(invalid_status.startswith("400"))
 
     def test_job_search_salary_overlap_excludes_unparseable_and_paginates(self):
         with tempfile.TemporaryDirectory() as tmp:

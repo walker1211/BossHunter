@@ -6,6 +6,8 @@ import json
 import sqlite3
 from typing import Any, Iterable
 
+from bosshunter.ai.prefilter import quick_score
+
 
 SCORE_SCOPES = {"pending", "failed", "selected", "all_scored"}
 PREFILTER_PREFIXES = ("预筛不通过:", "AI评分失败:", "AI 评分失败:", "评分失败:")
@@ -109,9 +111,12 @@ def preview_scoring(
 	job_ids: Iterable[Any] | None = None,
 	force_rescore: bool = False,
 	max_attempts_per_job: int = 2,
+	config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
 	options = validate_options(scope, limit, job_ids, force_rescore)
 	selected = _query_jobs(conn, options)
+	prefiltered = sum(quick_score(job, config)[0] == 0 for job in selected) if config is not None else 0
+	ai_requests = len(selected) - prefiltered
 	eligible_ids = {str(job["id"]) for job in selected}
 	if options["scope"] == "selected":
 		requested = set(options["job_ids"])
@@ -129,11 +134,12 @@ def preview_scoring(
 		"scope": options["scope"],
 		"eligible_jobs": len(selected),
 		"skipped_jobs": skipped,
-		"first_attempt_requests": len(selected),
+		"prefiltered_jobs": prefiltered,
+		"first_attempt_requests": ai_requests,
 		"max_attempts_per_job": attempts,
-		"max_possible_requests": len(selected) * attempts,
+		"max_possible_requests": ai_requests * attempts,
 		"job_ids": [str(job["id"]) for job in selected],
-		"note": "关键词预筛可能减少实际 AI 请求数；已进入投递链路的岗位不会重评。",
+		"note": "命中当前预筛规则的岗位不会请求 AI；已进入投递链路的岗位不会重评。",
 	}
 
 

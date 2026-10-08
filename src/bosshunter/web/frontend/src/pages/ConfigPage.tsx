@@ -168,6 +168,7 @@ export default function ConfigPage() {
     const preset = AI_SERVICES[service]
     updateConfig('ai.service', service)
     updateConfig('ai.provider', preset.provider)
+    updateConfig('ai.api_format', 'chat_completions')
     updateConfig('ai.base_url', preset.baseUrl)
     updateConfig('ai.model', preset.defaultModel)
     updateConfig('ai.api_key', '')
@@ -390,6 +391,18 @@ export default function ConfigPage() {
               </div>
               <Switch aria-label="过滤面议/无法解析薪资" checked={config.profile?.allow_internship ? false : (config.profile?.filter_unparsed_salary ?? true)} disabled={config.profile?.allow_internship === true} onChange={v => updateConfig('profile.filter_unparsed_salary', v)} />
             </div>
+            <Field label="BOSS HR 活跃时间（天）">
+              <Input type="number" min={0} max={365} step={1} aria-label="BOSS HR 活跃时间（天）"
+                value={config.profile?.hr_active_within_days ?? 0}
+                onChange={e => updateConfig('profile.hr_active_within_days', Number(e.target.value))} />
+              <p className="mt-1 text-xs text-muted">仅采集近 N 天活跃的 HR 岗位，0 表示不限。读取详情后过滤，不修改已有岗位，不影响其他平台。</p>
+            </Field>
+            <label className="flex items-center gap-2 text-xs text-foreground">
+              <input type="checkbox" checked={config.profile?.hr_active_keep_unknown ?? true}
+                disabled={!config.profile?.hr_active_within_days}
+                onChange={e => updateConfig('profile.hr_active_keep_unknown', e.target.checked)} />
+              保留活跃度未知岗位（仅在启用活跃过滤时生效）
+            </label>
             <Field label="排除关键词">
               <TagsInput value={config.profile?.deal_breakers || []} onChange={v => updateConfig('profile.deal_breakers', v)} placeholder="如：外包、996" />
             </Field>
@@ -534,7 +547,7 @@ export default function ConfigPage() {
                 </Select>
               </Field>
               <div className="flex items-center justify-between rounded-xl border border-card-border bg-surface px-3 py-2 text-xs font-bold text-muted">
-                采集后自动评分
+                <div>采集后自动评分<p className="mt-1 font-normal leading-5">仅作为下次采集的默认选项，只评分该次新增岗位；已有或预筛拦截岗位不会因此补评。</p></div>
                 <Switch checked={config.collection?.auto_score_default ?? false} onChange={value => updateConfig('collection.auto_score_default', value)} />
               </div>
             </div>
@@ -571,6 +584,18 @@ export default function ConfigPage() {
                 }，不会在前端显示其内容。
               </p>
             </Field>
+            {config.ai?.provider === 'openai_compatible' && (
+              <Field label="接口格式">
+                <Select value={config.ai?.api_format || 'chat_completions'} onChange={e => {
+                  updateConfig('ai.api_format', e.target.value)
+                  setAiTest({ testing: false })
+                }}>
+                  <option value="chat_completions">Chat Completions (/chat/completions)</option>
+                  <option value="responses">Responses (/responses)</option>
+                </Select>
+                <p className="mt-1 text-xs text-muted">按服务商实际支持的接口选择；Base URL 填到 /v1。</p>
+              </Field>
+            )}
             <Field label="模型名称">
               <div className="flex flex-wrap gap-2">
                 <Input aria-label="模型名称" className="min-w-0 flex-1 basis-40" value={config.ai?.model || ''} onChange={e => {
@@ -741,7 +766,7 @@ export default function ConfigPage() {
             </Field>
             <div className="grid gap-4 md:grid-cols-2">
               <Field label="每日发送上限">
-                <Input type="number" value={config.throttle?.daily_limit || 30} onChange={e => updateConfig('throttle.daily_limit', Number(e.target.value))} />
+                <Input type="number" value={config.throttle?.daily_limit ?? 30} onChange={e => updateConfig('throttle.daily_limit', Number(e.target.value))} />
               </Field>
               <NumberRangeField
                 label="发送间隔范围（秒）"

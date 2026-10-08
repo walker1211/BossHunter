@@ -10,7 +10,7 @@ import sqlite3
 from typing import Any, Iterable
 
 from bosshunter.cities import get_city_code
-from bosshunter.job_filters import parse_monthly_salary_k
+from bosshunter.job_filters import matches_hr_activity, parse_monthly_salary_k, validate_hr_activity_filter
 
 
 MAX_EXPORT_JOB_IDS = 1000
@@ -25,6 +25,8 @@ EXPORT_COLUMNS = [
 	("公司", "company"),
 	("薪资", "salary"),
 	("城市", "city"),
+	("休息安排（职位文案）", "work_schedule_label"),
+	("休息安排依据", "work_schedule_evidence"),
 	("平台城市编码", "platform_city_code"),
 	("工作经验", "experience"),
 	("学历要求", "education"),
@@ -84,6 +86,7 @@ def _normalize_export_ids(job_ids: Iterable[Any] | None) -> list[str]:
 
 def _filtered_rows(conn: sqlite3.Connection, filters: dict[str, Any] | None = None) -> list[dict[str, Any]]:
 	filters = filters or {}
+	activity_filter = validate_hr_activity_filter(str(filters.get("hr_active_within") or "").strip())
 	conditions: list[str] = ["deleted_at IS NULL"]
 	params: list[Any] = []
 	keyword = str(filters.get("q") or filters.get("query") or "").strip()
@@ -112,6 +115,12 @@ def _filtered_rows(conn: sqlite3.Connection, filters: dict[str, Any] | None = No
 		placeholders = ",".join("?" for _ in source_platforms)
 		conditions.append(f"COALESCE(source_platform, 'boss') IN ({placeholders})")
 		params.extend(source_platforms)
+	work_schedule = str(filters.get("work_schedule") or "").strip()
+	if work_schedule:
+		if work_schedule not in {"double", "alternate", "single", "unclear", "unknown"}:
+			raise ValueError("work_schedule 参数无效")
+		conditions.append("COALESCE(work_schedule, 'unknown') = ?")
+		params.append(work_schedule)
 	recruitment_types = values("recruitment_type")
 	if recruitment_types:
 		if any(value not in {"campus", "experienced", "unknown"} for value in recruitment_types):
@@ -152,6 +161,8 @@ def _filtered_rows(conn: sqlite3.Connection, filters: dict[str, Any] | None = No
 		query += " WHERE " + " AND ".join(conditions)
 	query += " ORDER BY created_at DESC, score DESC"
 	rows = [dict(row) for row in conn.execute(query, params).fetchall()]
+
+	rows = [row for row in rows if matches_hr_activity(row.get("hr_active"), activity_filter)]
 
 	salary_min = filters.get("salary_min")
 	salary_max = filters.get("salary_max")
@@ -243,6 +254,10 @@ def _row_values(job: dict[str, Any]) -> list[Any]:
 		**job,
 		"source_platform_label": platform_labels.get(platform, platform),
 		"platform_city_code": city_code,
+		"work_schedule_label": {
+			"double": "文案称双休", "alternate": "文案称大小周", "single": "文案称单休",
+			"unclear": "表述冲突",
+		}.get(str(job.get("work_schedule") or ""), "未说明"),
 		"recruitment_type_label": {"campus": "校招", "experienced": "社招"}.get(
 			str(job.get("recruitment_type") or ""), "未识别"
 		),

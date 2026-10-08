@@ -28,7 +28,7 @@ class AgentRequestError(ValueError):
 
 
 def validate_agent_evaluations(value: Any, threshold: int) -> list[dict[str, Any]]:
-    """Validate Agent-authored scores and greetings before a database mutation."""
+    """Validate Agent-authored scores and optional greetings before a database mutation."""
     if not isinstance(value, list) or not value:
         raise AgentRequestError("evaluations 必须是非空数组")
     if len(value) > _MAX_AGENT_EVALUATIONS:
@@ -54,7 +54,7 @@ def validate_agent_evaluations(value: Any, threshold: int) -> list[dict[str, Any
 
         passed = score_result.score >= threshold
         greeting_value = item.get("greeting")
-        if passed:
+        if passed and greeting_value is not None:
             greeting = _validated_agent_greeting(greeting_value)
         elif greeting_value is not None:
             raise AgentRequestError("未达到通过线的岗位不能附带 greeting")
@@ -110,6 +110,10 @@ def agent_preferences(config: dict[str, Any]) -> dict[str, Any]:
     return {
         "keywords": _string_list(search.get("keywords")),
         "cities": _string_list(search.get("cities")) or _string_list(profile.get("target_cities")),
+        "commute": {
+            "origin": str(profile.get("commute_origin") or ""),
+            "max_minutes": _number(profile.get("commute_max_minutes"), 0),
+        },
         "salary": {
             "min": _number(profile.get("salary_min"), 0),
             "max": _number(profile.get("salary_max"), 0),

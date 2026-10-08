@@ -1,6 +1,9 @@
+import json
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
+
+import httpx
 
 from bosshunter.ai import credentials
 
@@ -489,6 +492,48 @@ class AnthropicCredentialTests(unittest.TestCase):
         self.assertEqual(post.call_args.kwargs["headers"]["Authorization"], "Bearer deepseek-secret")
         self.assertEqual(post.call_args.kwargs["json"]["model"], "provider-current-model")
         self.assertFalse(post.call_args.kwargs["trust_env"])
+
+    def test_responses_format_uses_streaming_message_array_and_collects_final_text(self):
+        config = {"ai": {
+            "service": "custom", "provider": "openai_compatible",
+            "api_format": "responses", "base_url": "https://example.test/v1",
+            "model": "test-model", "api_key": "secret",
+        }}
+        events = [
+            {"type": "response.output_text.delta", "delta": "O"},
+            {"type": "response.output_text.done", "text": "OK"},
+            {"type": "response.completed", "response": {"status": "completed"}},
+        ]
+        body = "".join(f"data: {json.dumps(event)}\n\n" for event in events)
+        response = httpx.Response(200, text=body, request=httpx.Request("POST", "https://example.test/v1/responses"))
+
+        with patch("bosshunter.ai.credentials.httpx.post", return_value=response) as post:
+            result = credentials.call_openai_compatible_text("prompt", config, 123)
+
+        self.assertEqual(result, "OK")
+        self.assertEqual(post.call_args.args[0], "https://example.test/v1/responses")
+        self.assertEqual(post.call_args.kwargs["json"], {
+            "model": "test-model",
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "prompt"}]}],
+            "stream": True,
+            "max_output_tokens": 123,
+        })
+        self.assertFalse(post.call_args.kwargs["trust_env"])
+
+    def test_responses_format_rejects_incomplete_stream(self):
+        config = {"ai": {
+            "service": "custom", "provider": "openai_compatible",
+            "api_format": "responses", "base_url": "https://example.test/v1",
+            "model": "test-model", "api_key": "secret",
+        }}
+        response = httpx.Response(200, text='data: {"type":"response.output_text.delta","delta":"partial"}\n\n',
+                                  request=httpx.Request("POST", "https://example.test/v1/responses"))
+
+        with patch("bosshunter.ai.credentials.httpx.post", return_value=response):
+            with self.assertRaises(credentials.AIRequestError) as raised:
+                credentials.call_openai_compatible_text("prompt", config, 123)
+
+        self.assertEqual(raised.exception.kind, "empty_response")
 
     def test_deepseek_shorthand_model_is_resolved_before_chat_request(self):
         class ModelsResponse:

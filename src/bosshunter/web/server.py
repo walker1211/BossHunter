@@ -82,7 +82,10 @@ from bosshunter.collection_run_store import (
 	list_collection_runs,
 	mark_orphaned_collection_runs_stopped,
 )
-from bosshunter.job_filters import parse_monthly_salary_k
+from bosshunter.job_filters import (
+	matches_hr_activity, parse_hr_active_days, parse_monthly_salary_k,
+	validate_hr_activity_config, validate_hr_activity_filter,
+)
 from bosshunter.job_export import InvalidJobSelectionError, export_jobs, export_row_count
 from bosshunter.scoring_run_store import (
 	create_scoring_run,
@@ -243,6 +246,7 @@ def _serialize_job(item):
 	"""Expose outsourcing evidence and greeting state in one API representation."""
 	record = serialize_job(dict(item))
 	record["greeting_activity"] = greeting_activity.get(str(record.get("id") or ""))
+	record["hr_active_days"] = parse_hr_active_days(record.get("hr_active"))
 	raw_issues = record.get("greeting_style_issues")
 	if isinstance(raw_issues, str):
 		try:
@@ -1165,6 +1169,7 @@ def _query_values(name: str) -> list[str]:
 @app.route("/api/jobs/search")
 def api_job_search():
 	try:
+		activity_filter = validate_hr_activity_filter(request.params.get("hr_active_within", "").strip())
 		minimum_score = _optional_float_param("min_score", maximum=100)
 		salary_min = _optional_float_param("salary_min")
 		salary_max = _optional_float_param("salary_max")
@@ -1178,6 +1183,9 @@ def api_job_search():
 		recruitment_types = _query_values("recruitment_type")
 		if any(value not in {"campus", "experienced", "unknown"} for value in recruitment_types):
 			raise ValueError("recruitment_type 参数无效")
+		work_schedule = request.params.get("work_schedule", "").strip()
+		if work_schedule and work_schedule not in {"double", "alternate", "single", "unclear", "unknown"}:
+			raise ValueError("work_schedule 参数无效")
 		education_filters = _query_values("education")
 		if any(value not in {"博士", "硕士", "本科", "大专", "不限", "其他", "unknown"} for value in education_filters):
 			raise ValueError("education 参数无效")
@@ -1226,6 +1234,9 @@ def api_job_search():
 				education_conditions.append("education LIKE ?")
 				params.append(f"%{value}%")
 		conditions.append(f"({' OR '.join(education_conditions)})")
+	if work_schedule:
+		conditions.append("COALESCE(work_schedule, 'unknown') = ?")
+		params.append(work_schedule)
 	if created_within == "today":
 		conditions.append("created_at >= datetime('now', 'localtime', 'start of day', 'utc')")
 	elif created_within == "3d":
@@ -1261,6 +1272,7 @@ def api_job_search():
 					continue
 				filtered_rows.append(row)
 			rows = filtered_rows
+		rows = [row for row in rows if matches_hr_activity(row.get("hr_active"), activity_filter)]
 		total = len(rows)
 		return _json_response({
 			"items": [_serialize_job(row) for row in rows[offset:offset + limit]],
@@ -1427,7 +1439,7 @@ def api_workbench():
 	try:
 		config = load_config(CONFIG_PATH)
 		threshold = config.get("scoring", {}).get("threshold", 60)
-		daily_limit = int(config.get("throttle", {}).get("daily_limit", 30) or 30)
+		daily_limit = int(config.get("throttle", {}).get("daily_limit", 30))
 		today_sent_row = db.execute(
 			"SELECT COUNT(*) AS cnt FROM history WHERE action='sent' AND date(created_at)=date('now')"
 		).fetchone()
@@ -1521,7 +1533,7 @@ def api_scoring_preview():
 		max_attempts = config.get("ai", {}).get("scoring_max_attempts", 2)
 		db = _get_web_db()
 		try:
-			return _json_response(preview_scoring(db, **options, max_attempts_per_job=max_attempts))
+			return _json_response(preview_scoring(db, **options, max_attempts_per_job=max_attempts, config=config))
 		finally:
 			db.close()
 	except ValueError as exc:
@@ -2540,6 +2552,10 @@ def api_config_post():
 		from bosshunter.ai.greeter import greeting_config_error
 		if error := greeting_config_error(data):
 			return _json_response({"error": error}, 400)
+		try:
+			validate_hr_activity_config(profile)
+		except ValueError as exc:
+			return _json_response({"error": str(exc)}, 400)
 
 		# Write YAML (backend exclusively owns YAML serialization)
 		_write_config(data)
@@ -2752,10 +2768,16 @@ def _agent_resume_context(config: dict, include_resume: bool) -> dict:
 def _agent_job_evaluation_context(job: dict) -> dict:
 	"""Keep the Agent scoring payload limited to fields needed for evaluation."""
 	fields = (
-		"id", "title", "company", "salary", "city", "experience", "education",
+		"id", "title", "company", "salary", "city", "work_location", "experience", "education",
 		"recruitment_type", "company_size", "company_industry", "hr_name", "hr_title",
 	)
 	context = {field: str(job.get(field) or "") for field in fields}
+	context["commute"] = {
+		"origin": str(job.get("commute_origin") or ""),
+		"minutes": job.get("commute_minutes"),
+		"mode": str(job.get("commute_mode") or ""),
+		"checked_at": str(job.get("commute_checked_at") or ""),
+	}
 	jd = str(job.get("jd") or "")
 	context["jd"] = jd[:12000]
 	context["jd_truncated"] = len(jd) > len(context["jd"])
@@ -2829,7 +2851,7 @@ def api_agent_submit_evaluations():
 			"success": True,
 			"result": result,
 			"policy": {
-				"delivery": "评分和招呼语仅准备待确认岗位；任何发送仍须经过用户的明确确认和既有风控流程。",
+				"delivery": "未提供招呼语时仅保存评分；提供招呼语仍须经用户明确确认和既有风控流程才能发送。",
 			},
 		})
 	except AgentRequestError as exc:

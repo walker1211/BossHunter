@@ -15,6 +15,7 @@ from bosshunter.outsourcing import (
     parse_persisted_columns,
     rules_version,
 )
+from bosshunter.work_schedule import infer_work_schedule
 
 
 DB_PATH = Path("./data/bosshunter.db")
@@ -172,6 +173,8 @@ def _init_tables(conn: sqlite3.Connection) -> None:
     _migrate_v1_4(conn)
     _migrate_v1_5(conn)
     _migrate_outsourcing(conn)
+    _migrate_work_location(conn)
+    _migrate_work_schedule(conn)
     _migrate_platform_access_events(conn)
     _init_scoring_runs(conn)
     _init_collection_runs(conn)
@@ -480,12 +483,17 @@ def insert_job_if_new(
     table consistent without forcing every caller to plumb a Rules
     instance.
     """
+    schedule, schedule_source, schedule_evidence = infer_work_schedule(job.get("title", ""), job.get("jd", ""))
     values = {
         "id": str(job.get("id") or ""),
         "title": str(job.get("title") or ""),
         "company": str(job.get("company") or ""),
         "salary": job.get("salary", ""),
         "city": job.get("city", ""),
+        "work_location": job.get("work_location", ""),
+        "work_schedule": schedule,
+        "work_schedule_source": schedule_source,
+        "work_schedule_evidence": schedule_evidence,
         "experience": job.get("experience", ""),
         "education": job.get("education", ""),
         "recruitment_type": (
@@ -517,13 +525,15 @@ def insert_job_if_new(
     cursor = conn.execute(
         """
         INSERT OR IGNORE INTO jobs (
-            id, title, company, salary, city, experience, education, recruitment_type, jd,
+            id, title, company, salary, city, work_location, work_schedule, work_schedule_source,
+            work_schedule_evidence, experience, education, recruitment_type, jd,
             hr_name, hr_title, hr_active, company_size, company_industry, url,
             source_platform, source_job_id, source_keyword, source_city_code,
             outsourcing_level, outsourcing_confirmed, outsourcing_matches,
             outsourcing_layers, outsourcing_updated_at, outsourcing_rules_version
         ) VALUES (
-            :id, :title, :company, :salary, :city, :experience, :education, :recruitment_type, :jd,
+            :id, :title, :company, :salary, :city, :work_location, :work_schedule, :work_schedule_source,
+            :work_schedule_evidence, :experience, :education, :recruitment_type, :jd,
             :hr_name, :hr_title, :hr_active, :company_size, :company_industry, :url,
             :source_platform, :source_job_id, :source_keyword, :source_city_code,
             :outsourcing_level, :outsourcing_confirmed, :outsourcing_matches,
@@ -606,23 +616,26 @@ def persist_agent_evaluations(conn: sqlite3.Connection, evaluations: list[dict[s
         raise ValueError("只能评估未评分的待处理岗位：" + "、".join(blocked))
 
     ready: list[str] = []
+    scored: list[str] = []
     filtered: list[str] = []
     with conn:
         for evaluation in evaluations:
             job_id = str(evaluation["job_id"])
             passed = bool(evaluation["passed"])
-            status = "ready" if passed else "filtered"
+            greeting = str(evaluation["greeting"]) if passed and evaluation["greeting"] else None
+            status = ("ready" if greeting else "scored") if passed else "filtered"
             cursor = conn.execute(
                 "UPDATE jobs SET score = ?, score_reason = ?, greeting = ?, status = ?, "
                 "greeting_original = ?, greeting_optimized = NULL, greeting_style_issues = '[]', "
-                "greeting_selection = 'generated', greeting_reviewed_at = NULL, "
+                "greeting_selection = ?, greeting_reviewed_at = NULL, "
                 "updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'pending' AND deleted_at IS NULL",
                 (
                     int(evaluation["score"]),
                     str(evaluation["reason"]),
-                    str(evaluation["greeting"]) if passed else None,
+                    greeting,
                     status,
-                    str(evaluation["greeting"]) if passed else None,
+                    greeting,
+                    "generated" if greeting else "legacy",
                     job_id,
                 ),
             )
@@ -653,8 +666,8 @@ def persist_agent_evaluations(conn: sqlite3.Connection, evaluations: list[dict[s
                 "INSERT INTO history (job_id, action, detail) VALUES (?, 'agent_evaluated', ?)",
                 (job_id, detail),
             )
-            (ready if passed else filtered).append(job_id)
-    return {"ready": ready, "filtered": filtered}
+            (ready if greeting else scored if passed else filtered).append(job_id)
+    return {"ready": ready, "scored": scored, "filtered": filtered}
 
 
 def get_score_trace(conn: sqlite3.Connection, job_id: str) -> tuple[bool, dict[str, Any] | None]:
@@ -1237,6 +1250,44 @@ def recompute_outsourcing(conn: sqlite3.Connection, rules: Rules) -> int:
             )
             changed += 1
     return changed
+
+
+def _migrate_work_location(conn: sqlite3.Connection) -> None:
+    """Keep office location and verified transit estimates separate from search city."""
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(jobs)").fetchall()}
+    additions = {
+        "work_location": "TEXT DEFAULT ''",
+        "commute_origin": "TEXT NULL",
+        "commute_minutes": "INTEGER NULL",
+        "commute_mode": "TEXT NULL",
+        "commute_checked_at": "TIMESTAMP NULL",
+    }
+    for name, definition in additions.items():
+        if name not in cols:
+            conn.execute(f"ALTER TABLE jobs ADD COLUMN {name} {definition}")
+    conn.commit()
+
+
+def _migrate_work_schedule(conn: sqlite3.Connection) -> None:
+    """Add posting-claim fields and classify existing jobs once, without touching scores."""
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(jobs)").fetchall()}
+    additions = {
+        "work_schedule": "TEXT NOT NULL DEFAULT 'unknown'",
+        "work_schedule_source": "TEXT NOT NULL DEFAULT ''",
+        "work_schedule_evidence": "TEXT NOT NULL DEFAULT ''",
+    }
+    needs_backfill = any(name not in cols for name in additions)
+    for name, definition in additions.items():
+        if name not in cols:
+            conn.execute(f"ALTER TABLE jobs ADD COLUMN {name} {definition}")
+    if needs_backfill:
+        for row in conn.execute("SELECT id, title, jd FROM jobs").fetchall():
+            schedule, source, evidence = infer_work_schedule(row["title"], row["jd"])
+            conn.execute(
+                "UPDATE jobs SET work_schedule = ?, work_schedule_source = ?, work_schedule_evidence = ? WHERE id = ?",
+                (schedule, source, evidence, row["id"]),
+            )
+    conn.commit()
 
 
 def _migrate_platform_access_events(conn: sqlite3.Connection) -> None:

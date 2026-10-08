@@ -98,6 +98,19 @@ def _decode_fields(raw: dict) -> dict:
             for key, value in raw.items()}
 
 
+def _city_from_location(value: Any) -> str:
+    """Read an explicit city prefix, never infer it from the search URL."""
+    location = str(value or "").strip()
+    for city in sorted(CITY_CODES, key=len, reverse=True):
+        if location.startswith(city) or location.startswith(f"{city}市"):
+            return city
+    return ""
+
+
+def _normalize_city(value: Any) -> str:
+    return str(value or "").strip().removesuffix("市")
+
+
 _SALARY_DECODE_ACTIONS = ("stop", "skip_job")
 
 
@@ -193,6 +206,10 @@ JS_EXTRACT_DETAIL = """
     info.experience = tagTexts[0] || '';
     info.education = tagTexts[1] || '';
     const pageText = document.body?.innerText || '';
+    const addressMatch = pageText.match(/工作地址\\s*\\n\\s*([^\\n]+)/);
+    info.work_location = (document.querySelector('.location-address')?.textContent?.trim()
+        || (addressMatch ? addressMatch[1].trim() : '')).slice(0, 180);
+    info.city = document.querySelector('.info-primary .text-city')?.textContent?.trim() || '';
     info.recruitment_type = /校招|校园招聘|应届|毕业生|管培生|实习生/.test(pageText)
         ? 'campus'
         : (/社招|社会招聘/.test(pageText) ? 'experienced' : 'unknown');
@@ -659,6 +676,19 @@ class BossCollector:
                             continue
                         page_failures = 0
                         merged = self._merge_detail(candidate, detail, detail_url)
+                        detail_city = _normalize_city(detail.get("city"))
+                        address_city = _city_from_location(detail.get("work_location"))
+                        if detail_city and address_city and detail_city != address_city:
+                            combo_complete = False
+                            hooks.on_parse_failed("BOSS 职位城市与工作地址冲突")
+                            continue
+                        if not detail_city and not address_city:
+                            combo_complete = False
+                            hooks.on_parse_failed("BOSS 职位缺少可核实的工作城市")
+                            continue
+                        if _normalize_city(merged.city) != _normalize_city(city):
+                            hooks.on_event(message="BOSS 职位工作城市与搜索城市不符", increment_filtered=True)
+                            continue
                         if (merged.source_job_id in undecodable_salary
                                 and _PRIVATE_GLYPH.search(merged.salary)):
                             merged = replace(merged, salary="")
@@ -736,7 +766,8 @@ class BossCollector:
             title=str(raw.get("title") or "").strip(),
             company=str(raw.get("company") or "").strip(),
             salary=str(raw.get("salary") or "").strip(),
-            city=city,
+            city=_city_from_location(raw.get("location")),
+            work_location=str(raw.get("location") or "").strip(),
             city_code=city_code,
             experience=str(raw.get("experience") or "").strip(),
             education=str(raw.get("education") or "").strip(),
@@ -753,7 +784,8 @@ class BossCollector:
             title=str(detail.get("title") or candidate.title).strip(),
             company=str(detail.get("company") or candidate.company).strip(),
             salary=str(detail.get("salary") or candidate.salary).strip(),
-            city=candidate.city,
+            city=_normalize_city(detail.get("city")) or _city_from_location(detail.get("work_location")) or candidate.city,
+            work_location=str(detail.get("work_location") or candidate.work_location).strip(),
             city_code=candidate.city_code,
             experience=str(detail.get("experience") or candidate.experience).strip(),
             education=str(detail.get("education") or candidate.education).strip(),

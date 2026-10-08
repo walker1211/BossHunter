@@ -5,6 +5,7 @@ import { Badge } from '@/components/ui/badge'
 import { CheckCircle2, ChevronDown, ChevronUp, ExternalLink, Trash2 } from 'lucide-react'
 import { getStatusLabel } from '@/lib/status'
 import { PLATFORM_SHORT_LABELS } from '@/lib/platforms'
+import { workScheduleLabel } from '@/lib/workSchedule'
 import type { Job } from '@/hooks/useDashboard'
 import type { JobSortKey, JobSortOrder } from '@/hooks/useJobSearch'
 
@@ -131,12 +132,13 @@ export function JobsTable({ jobs, page, pageSize, total, onPageChange, selectedI
                 <th className="px-4 py-3 text-left font-bold">公司</th>
                 <th className="px-4 py-3 text-left font-bold">职位</th>
                 <th className="px-4 py-3 text-left font-bold">城市</th>
+                <th className="px-4 py-3 text-left font-bold">休息安排</th>
                 <th className="px-4 py-3 text-left">{sortableHeader('薪资', 'salary')}</th>
                 <th className="px-4 py-3 text-left">{sortableHeader('学历 / 招聘类型', 'education')}</th>
                 <th className="px-4 py-3 text-left">{sortableHeader('评分', 'score')}</th>
                 <th className="px-4 py-3 text-left">{sortableHeader('状态', 'status')}</th>
                 <th className="px-4 py-3 text-left">{sortableHeader('招聘者活跃', 'hr_active')}</th>
-                <th className="px-4 py-3 text-left">{sortableHeader('时间', 'created_at')}</th>
+                <th className="px-4 py-3 text-left" title="本地首次收录时间，并非招聘平台的发布时间">{sortableHeader('收录时间', 'created_at')}</th>
                 {hasActions && <th className="min-w-[210px] px-3 py-3 text-center font-bold">操作</th>}
               </tr>
             </thead>
@@ -175,18 +177,25 @@ export function JobsTable({ jobs, page, pageSize, total, onPageChange, selectedI
                       </td>
                       <td className="max-w-[220px] truncate px-4 py-3 font-bold text-foreground">{job.title}</td>
                       <td className="px-4 py-3 text-muted">{job.city || '未识别'}</td>
+                      <td className="whitespace-nowrap px-4 py-3 text-xs text-muted" title={job.work_schedule_evidence || '职位未说明休息安排'}>{workScheduleLabel(job.work_schedule)}</td>
                       <td className="px-4 py-3 text-muted">{job.salary || '-'}</td>
                       <td className="px-4 py-3 text-xs">
                         <div className="font-bold text-foreground">{job.education || '学历未识别'}</div>
                         <div className="mt-1 text-muted">{job.recruitment_type === 'campus' ? '校招' : job.recruitment_type === 'experienced' ? '社招' : '类型未识别'}</div>
                       </td>
                       <td className="px-4 py-3">
-                        <span className={`font-mono font-black ${getScoreColor(job.score)}`}>{job.score || '-'}</span>
+                        {job.status === 'filtered' && job.score === 0 && job.score_reason?.startsWith('预筛不通过:')
+                          ? <span className="text-xs font-bold text-muted" title="命中预筛规则，尚未调用 AI 评分">预筛未评</span>
+                          : <span className={`font-mono font-black ${getScoreColor(job.score)}`}>{job.score || '-'}</span>}
                       </td>
                       <td className="px-4 py-3">
                         <Badge variant={statusVariant(job.status) as any}>{getStatusLabel(job.status)}</Badge>
                       </td>
-                      <td className="px-4 py-3 text-xs text-muted">{job.hr_active || '活跃度未知'}</td>
+                      <td className="px-4 py-3">
+                        <Badge className="whitespace-nowrap" title="采集时记录的 HR 活跃状态，不代表实时状态">
+                          {job.hr_active?.trim() || '活跃度未知'}
+                        </Badge>
+                      </td>
                       <td className="px-4 py-3 text-xs text-muted">
                         <div className="flex items-center gap-2">
                           {timeAgo(job.created_at)}
@@ -248,7 +257,7 @@ export function JobsTable({ jobs, page, pageSize, total, onPageChange, selectedI
                     </tr>
                     {isExpanded && (
                       <tr className="border-b border-card-border bg-surface">
-                        <td colSpan={hasActions ? 11 : 10} className="px-6 py-4">
+                        <td colSpan={hasActions ? 12 : 11} className="px-6 py-4">
                           <div className="grid grid-cols-1 gap-4 text-sm lg:grid-cols-3">
                             <div className="rounded-2xl border border-card-border bg-card p-4">
                               <p className="mb-2 text-xs font-black text-primary">JD摘要</p>
@@ -271,7 +280,7 @@ export function JobsTable({ jobs, page, pageSize, total, onPageChange, selectedI
               })}
               {!jobs.length && (
                 <tr>
-                  <td colSpan={hasActions ? 11 : 10} className="px-4 py-10 text-center text-sm text-muted">
+                  <td colSpan={hasActions ? 12 : 11} className="px-4 py-10 text-center text-sm text-muted">
                     {loading ? '正在读取岗位…' : '没有符合当前条件的岗位'}
                   </td>
                 </tr>

@@ -80,6 +80,28 @@ def test_selected_jobs_do_not_rescore_existing_results_without_explicit_force(tm
 	assert {job["id"] for job in forced} == {"pending", "scored"}
 
 
+def test_preview_excludes_hard_filtered_jobs_from_ai_request_count(tmp_path):
+	db = get_db(tmp_path / "prefilter-preview.db")
+	try:
+		blocked = _job("blocked")
+		blocked["title"] = "Web3 Backend"
+		insert_job(db, blocked)
+		insert_job(db, _job("ordinary"))
+		preview = preview_scoring(
+			db,
+			scope="selected",
+			job_ids=["blocked", "ordinary"],
+			config={"profile": {"deal_breakers": ["Web3"]}},
+		)
+	finally:
+		db.close()
+
+	assert preview["eligible_jobs"] == 2
+	assert preview["prefiltered_jobs"] == 1
+	assert preview["first_attempt_requests"] == 1
+	assert preview["max_possible_requests"] == 2
+
+
 def test_scoring_selection_rejects_non_array_job_ids():
 	with pytest.raises(ValueError, match="岗位 ID 必须是数组"):
 		validate_options(scope="selected", job_ids="job-one")

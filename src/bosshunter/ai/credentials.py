@@ -1,6 +1,7 @@
 """Credential helpers for AI providers."""
 
 import hashlib
+import json
 import os
 import re
 
@@ -604,8 +605,10 @@ def call_openai_compatible_text(
     timeout: float | None = None,
     purpose: str | None = None,
 ) -> str | None:
-    """Call an OpenAI-compatible chat completions endpoint."""
+    """Call the selected OpenAI-compatible text endpoint."""
     ai_cfg = config.get("ai", {}) if isinstance(config, dict) else {}
+    if ai_cfg.get("api_format") == "responses":
+        return call_openai_responses_text(prompt, config, max_tokens, timeout=timeout)
     api_key = get_ai_api_key(config)
     base_url = get_ai_base_url(config)
     model = get_openai_compatible_model(config)
@@ -672,6 +675,81 @@ def call_openai_compatible_text(
         raise normalize_ai_error(compatibility_error) from compatibility_error
     # 同 call_anthropic_text：OpenAI 兼容路径此前在这里静默 return None，
     # 截断后空 choices、thinking-only 响应全部无声失败（issue #102）。
+    raise AIRequestError("empty_response", "AI 服务没有返回文本内容，可能只返回了思考过程")
+
+
+def call_openai_responses_text(
+    prompt: str,
+    config: dict,
+    max_tokens: int,
+    *,
+    timeout: float | None = None,
+) -> str | None:
+    """Call a streaming Responses endpoint and collect final output text."""
+    ai_cfg = config.get("ai", {}) if isinstance(config, dict) else {}
+    api_key = get_ai_api_key(config)
+    base_url = get_ai_base_url(config)
+    model = get_openai_compatible_model(config)
+    if _should_resolve_openai_model(model, config):
+        model = resolve_openai_model(model, config)
+    if not api_key or not base_url:
+        return None
+
+    payload = {
+        "model": model,
+        "input": [{"role": "user", "content": [{"type": "input_text", "text": prompt}]}],
+        "stream": True,
+        "max_output_tokens": max_tokens,
+    }
+    response = None
+    try:
+        response = httpx.post(
+            f"{base_url.rstrip('/')}/responses",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json=payload,
+            timeout=_coerce_timeout(timeout if timeout is not None else ai_cfg.get("timeout_seconds", 60)),
+            trust_env=False,
+        )
+        response.raise_for_status()
+    except Exception as exc:
+        raise normalize_ai_error(exc, response) from exc
+
+    done_parts: list[str] = []
+    delta_parts: list[str] = []
+    completed = False
+    for line in response.text.splitlines():
+        if not line.startswith("data:"):
+            continue
+        try:
+            event = json.loads(line[5:].strip())
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(event, dict):
+            continue
+        event_type = event.get("type")
+        if event_type == "response.output_text.done":
+            text = event.get("text")
+            if isinstance(text, str):
+                done_parts.append(text)
+        elif event_type == "response.output_text.delta":
+            delta = event.get("delta")
+            if isinstance(delta, str):
+                delta_parts.append(delta)
+        elif event_type == "response.completed":
+            completed = True
+            result = event.get("response", {})
+            if isinstance(result, dict) and result.get("status") == "incomplete":
+                raise AIRequestError("output_truncated", "AI 返回内容因输出 Token 上限被截断")
+        elif event_type == "response.incomplete":
+            raise AIRequestError("output_truncated", "AI 返回内容因输出 Token 上限被截断")
+        elif event_type in {"error", "response.failed"}:
+            raise AIRequestError("request_failed", "AI 服务请求失败")
+
+    if not completed:
+        raise AIRequestError("empty_response", "AI 服务未完成响应")
+    text = "".join(done_parts or delta_parts).strip()
+    if text:
+        return text
     raise AIRequestError("empty_response", "AI 服务没有返回文本内容，可能只返回了思考过程")
 
 

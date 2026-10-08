@@ -7,6 +7,8 @@ from typing import Any
 
 import yaml
 
+from bosshunter.job_filters import validate_hr_activity_config
+
 
 # BOSS直聘城市编码映射
 CITY_CODES: dict[str, str] = {
@@ -80,6 +82,8 @@ DEFAULTS: dict[str, Any] = {
         "salary_ceil_ratio": 1.5,
         "filter_unparsed_salary": True,
         "allow_internship": False,
+        "hr_active_within_days": 0,
+        "hr_active_keep_unknown": True,
         "deal_breakers": [],
         "jd_deal_breakers": [],
         "blocked_companies": [],
@@ -164,6 +168,7 @@ DEFAULTS: dict[str, Any] = {
     "ai": {
         "provider": "anthropic",
         "service": "anthropic",
+        "api_format": "chat_completions",
         "model": "claude-sonnet-4-6",
         "thinking": "auto",
         "thinking_budget": 2048,
@@ -234,6 +239,7 @@ def load_config(config_path: Path | None = None) -> dict[str, Any]:
         _deep_merge(cfg, user_cfg)
     _normalize_config_sections(cfg)
     _validate_ai_provider(cfg)
+    validate_hr_activity_config(cfg["profile"])
     return cfg
 
 
@@ -390,6 +396,11 @@ def _validate_ai_provider(config: dict[str, Any]) -> None:
     expected_provider = AI_SERVICE_PRESETS[service]["provider"]
     if provider != expected_provider:
         ai_cfg["provider"] = expected_provider
+    api_format = ai_cfg.get("api_format", "chat_completions")
+    if api_format not in {"chat_completions", "responses"}:
+        raise ValueError("AI 接口格式仅支持 Chat Completions 或 Responses。")
+    if api_format == "responses" and ai_cfg["provider"] != "openai_compatible":
+        raise ValueError("Responses 接口格式仅适用于 OpenAI 兼容服务。")
 
 
 def _deep_copy_dict(d: dict) -> dict:

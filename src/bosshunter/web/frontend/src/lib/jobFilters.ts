@@ -8,9 +8,11 @@ export interface JobFilters {
   salaryMax: string
   status: string[]
   createdWithin: string
+  hrActiveWithin: string
   sourcePlatform: string[]
   education: string[]
   recruitmentType: string[]
+  workSchedule: string
 }
 
 export const EMPTY_JOB_FILTERS: JobFilters = {
@@ -20,9 +22,11 @@ export const EMPTY_JOB_FILTERS: JobFilters = {
   salaryMax: '',
   status: [],
   createdWithin: '',
+  hrActiveWithin: '',
   sourcePlatform: [],
   education: [],
   recruitmentType: [],
+  workSchedule: '',
 }
 
 export function useDebouncedValue<T>(value: T, delay: number) {
@@ -94,6 +98,12 @@ export function filterJobs(jobs: Job[], filters: JobFilters) {
 
   return jobs.filter(job => {
     if (!matchesCreatedWithin(job.created_at, filters.createdWithin)) return false
+    if (filters.hrActiveWithin) {
+      const days = job.hr_active_days
+      if (filters.hrActiveWithin === 'unknown') {
+        if (days != null) return false
+      } else if (days == null || days > Number(filters.hrActiveWithin.slice(0, -1))) return false
+    }
     if (keyword) {
       const searchable = [job.title, job.company, job.jd, job.score_reason]
         .join('\n')
@@ -105,6 +115,7 @@ export function filterJobs(jobs: Job[], filters: JobFilters) {
     if (filters.sourcePlatform.length > 0 && !filters.sourcePlatform.includes(job.source_platform || 'boss')) return false
     if (filters.recruitmentType.length > 0 && !filters.recruitmentType.includes(job.recruitment_type || 'unknown')) return false
     if (filters.education.length > 0 && !filters.education.some(value => value === 'unknown' ? !job.education : (job.education || '').includes(value))) return false
+    if (filters.workSchedule && (job.work_schedule || 'unknown') !== filters.workSchedule) return false
     if (salaryEnabled) {
       const salaryRange = parseMonthlySalaryK(job.salary || '')
       if (!salaryRange) return false

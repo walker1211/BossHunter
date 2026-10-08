@@ -71,7 +71,7 @@ class SearchBrowser:
         if script == JS_EXTRACT_DETAIL:
             assert "/job_detail/" in self.urls[target]
             return json.dumps({"title": "AI运营", "company": "测试公司", "jd": "负责AI运营",
-                               "salary": self.detail_salary})
+                               "city": "北京", "salary": self.detail_salary})
         return None
 
     def browser(self):

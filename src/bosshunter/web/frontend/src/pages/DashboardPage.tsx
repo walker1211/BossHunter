@@ -4,6 +4,7 @@ import { useDashboard, type CollectionProgress, type HistoryItem, type Job, type
 import { useJobSearch, type JobSortKey, type JobSortOrder } from '@/hooks/useJobSearch'
 import { Button } from '@/components/ui/button'
 import { JobsTable } from '@/components/dashboard/JobsTable'
+import { workScheduleDescription } from '@/lib/workSchedule'
 import { RecycleBinPanel } from '@/components/dashboard/RecycleBinPanel'
 import { ScoreJobsDialog } from '@/components/dashboard/ScoreJobsDialog'
 import { CollectJobsDialog } from '@/components/dashboard/CollectJobsDialog'
@@ -229,7 +230,7 @@ async function waitForGreetTask(taskId: string, timeoutMs = 300000): Promise<Wor
 }
 
 function jobSubtitle(job: Job) {
-  return [job.score ? `匹配 ${job.score}` : '', job.salary, job.hr_active || '活跃度未知', getStatusLabel(job.status)].filter(Boolean).join(' · ')
+  return [job.score ? `匹配 ${job.score}` : '', job.salary, job.hr_active ? `招聘者${job.hr_active}` : '招聘者活跃度未知', getStatusLabel(job.status)].filter(Boolean).join(' · ')
 }
 
 function safeExternalUrl(value: string | undefined, platform: string) {
@@ -1542,8 +1543,12 @@ function JobDetailModal({ job, onClose, onChanged }: { job: Job; onClose: () => 
           <InfoBlock label="HR" value={[job.hr_name, job.hr_title].filter(Boolean).join(' · ') || '-'} />
           <InfoBlock label="招聘者活跃" value={job.hr_active || '活跃度未知'} />
           <InfoBlock label="公司" value={[job.company_size, job.company_industry].filter(Boolean).join(' · ') || '-'} />
+          <InfoBlock label="办公区域" value={job.work_location || '未采集；通勤待核实'} />
+          <InfoBlock label="休息安排" value={workScheduleDescription(job.work_schedule)} />
+          {job.work_schedule_evidence && <InfoBlock label="文案依据" value={job.work_schedule_evidence} />}
+          <InfoBlock label="单程通勤" value={job.commute_minutes != null && job.commute_origin ? `从${job.commute_origin}约 ${job.commute_minutes} 分钟（${job.commute_mode || '公共交通'}，地图估算${job.commute_checked_at ? `，核于 ${job.commute_checked_at.slice(0, 10)}` : ''}）` : '待核实'} />
           <InfoBlock label="来源平台" value={job.source_platform && job.source_platform !== 'boss' && PLATFORM_LABELS[job.source_platform] ? `${PLATFORM_LABELS[job.source_platform]}｜当前只开放采集` : 'BOSS 直聘'} />
-          <InfoBlock label="匹配分" value={String(job.score || '-')} />
+          <InfoBlock label="匹配分" value={job.status === 'filtered' && job.score === 0 && job.score_reason?.startsWith('预筛不通过:') ? '预筛未评（未调用 AI）' : String(job.score || '-')} />
           <InfoBlock label="定制简历" value={job.resume_path || '未生成'} />
         </div>
         <div className="mt-4 rounded-2xl border border-card-border bg-surface p-4">
@@ -1626,7 +1631,7 @@ function JobsPoolView({ updateJobStatus }: { updateJobStatus: (jobId: string, st
 
   useEffect(() => {
     setPage(0)
-  }, [filters.query, filters.minScore, filters.salaryMin, filters.salaryMax, filters.status, filters.createdWithin, filters.sourcePlatform, filters.education, filters.recruitmentType])
+  }, [filters.query, filters.minScore, filters.salaryMin, filters.salaryMax, filters.status, filters.createdWithin, filters.hrActiveWithin, filters.sourcePlatform, filters.education, filters.recruitmentType, filters.workSchedule])
 
   const toggleSelected = (jobId: string) => {
     setSelectedIds(previous => previous.includes(jobId) ? previous.filter(id => id !== jobId) : [...previous, jobId])
@@ -1813,9 +1818,11 @@ function JobsPoolView({ updateJobStatus }: { updateJobStatus: (jobId: string, st
             salary_max: filters.salaryMax,
             status: filters.status,
             created_within: filters.createdWithin,
+            hr_active_within: filters.hrActiveWithin,
             source_platform: filters.sourcePlatform,
             education: filters.education,
             recruitment_type: filters.recruitmentType,
+            work_schedule: filters.workSchedule,
           } : {},
         }),
       })
@@ -1943,8 +1950,8 @@ function JobsPoolView({ updateJobStatus }: { updateJobStatus: (jobId: string, st
         <Button size="sm" disabled={!selectedIds.length} onClick={() => void deliverSelectedJobs()}>
           <Send className="mr-1 h-4 w-4" />BOSS 一键投递已选
         </Button>
-        <Button size="sm" onClick={() => void startQuickScoring()} disabled={quickScoring || !total}>
-          {quickScoring ? '启动评分中…' : '一键 AI 评分'}
+        <Button size="sm" onClick={() => selectedIds.length ? setShowScoreDialog(true) : void startQuickScoring()} disabled={quickScoring || !total}>
+          {quickScoring ? '启动评分中…' : selectedIds.length ? `评分已选 (${selectedIds.length})` : '评分未评分岗位'}
         </Button>
         <Button variant="secondary" size="sm" onClick={() => setShowScoreDialog(true)}>评分选项</Button>
         <ExportMenu onExport={exportJobs} hasSelection={selectedIds.length > 0} hasFiltered={total > 0} />

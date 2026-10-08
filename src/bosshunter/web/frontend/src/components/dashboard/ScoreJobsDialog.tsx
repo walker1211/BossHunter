@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Button } from '@/components/ui/button'
 
 type ScoreScope = 'pending' | 'failed' | 'selected' | 'all_scored'
@@ -6,6 +6,7 @@ type ScoreScope = 'pending' | 'failed' | 'selected' | 'all_scored'
 interface ScorePreview {
   eligible_jobs: number
   skipped_jobs: number
+  prefiltered_jobs: number
   first_attempt_requests: number
   max_attempts_per_job: number
   max_possible_requests: number
@@ -30,7 +31,7 @@ interface ScoringRun {
 }
 
 const scopeLabels: Record<ScoreScope, string> = {
-  pending: '未评分 / 失败',
+  pending: '未评分 / 失败（忽略勾选）',
   failed: '只重试失败',
   selected: '岗位池已选',
   all_scored: '重新评分全部有效评分岗位',
@@ -38,11 +39,13 @@ const scopeLabels: Record<ScoreScope, string> = {
 
 export function ScoreJobsDialog({ open, selectedJobIds, onClose, onStart }: ScoreJobsDialogProps) {
   const [scope, setScope] = useState<ScoreScope>('pending')
+  const [rescoreSelected, setRescoreSelected] = useState(false)
   const [limitText, setLimitText] = useState('全部')
   const [preview, setPreview] = useState<ScorePreview | null>(null)
   const [runs, setRuns] = useState<ScoringRun[]>([])
   const [loading, setLoading] = useState(false)
   const [message, setMessage] = useState('')
+  const previewRequestId = useRef(0)
 
   const normalizedLimit = limitText.trim()
   const limitValid = normalizedLimit === ''
@@ -55,15 +58,17 @@ export function ScoreJobsDialog({ open, selectedJobIds, onClose, onStart }: Scor
   }, [limitText])
 
   const loadPreview = async () => {
+    const requestId = ++previewRequestId.current
+    setPreview(null)
     if (!limitValid) {
-      setPreview(null)
+      setLoading(false)
       setMessage('评分数量请输入 1 到 10000 的整数，或输入“全部”。')
       return
     }
     setLoading(true)
     setMessage('')
     try {
-      const forceRescore = scope === 'all_scored'
+      const forceRescore = scope === 'all_scored' || (scope === 'selected' && rescoreSelected)
       const jobIds = scope === 'selected' ? selectedJobIds : []
       const res = await fetch('/api/scoring/preview', {
         method: 'POST',
@@ -72,12 +77,11 @@ export function ScoreJobsDialog({ open, selectedJobIds, onClose, onStart }: Scor
       })
       const data = await res.json().catch(() => ({}))
       if (!res.ok) throw new Error(data.error || '无法生成评分预览')
-      setPreview(data)
+      if (requestId === previewRequestId.current) setPreview(data)
     } catch (err) {
-      setPreview(null)
-      setMessage(err instanceof Error ? err.message : '无法生成评分预览')
+      if (requestId === previewRequestId.current) setMessage(err instanceof Error ? err.message : '无法生成评分预览')
     } finally {
-      setLoading(false)
+      if (requestId === previewRequestId.current) setLoading(false)
     }
   }
 
@@ -88,21 +92,29 @@ export function ScoreJobsDialog({ open, selectedJobIds, onClose, onStart }: Scor
 
   useEffect(() => {
     if (open) {
+      setScope(selectedJobIds.length ? 'selected' : 'pending')
+      setRescoreSelected(false)
+    }
+  }, [open])
+
+  useEffect(() => {
+    if (open) {
       void loadPreview()
       void loadRuns()
     }
-  }, [open, scope, limit, selectedJobIds.join(',')])
+  }, [open, scope, limit, rescoreSelected, selectedJobIds.join(',')])
 
   if (!open) return null
 
   const start = async () => {
     if (!preview?.eligible_jobs) return
     if (scope === 'all_scored' && !window.confirm('将重新评分所有仍可重评的有效评分岗位，已进入投递链路的岗位不会触碰。确认继续？')) return
+    if (scope === 'selected' && rescoreSelected && !window.confirm('将对已选岗位中的既有 AI 评分重新调用模型；当前预筛排除词仍会生效。确认继续？')) return
     if (!window.confirm(`本轮最多发出 ${preview.max_possible_requests} 次 AI 请求，是否开始？`)) return
     setLoading(true)
     setMessage('')
     try {
-      const result = await onStart({ scope, limit, job_ids: scope === 'selected' ? selectedJobIds : [], force_rescore: scope === 'all_scored' })
+      const result = await onStart({ scope, limit, job_ids: scope === 'selected' ? selectedJobIds : [], force_rescore: scope === 'all_scored' || (scope === 'selected' && rescoreSelected) })
       if (result.ok) {
         onClose()
         return
@@ -152,6 +164,12 @@ export function ScoreJobsDialog({ open, selectedJobIds, onClose, onStart }: Scor
               {Object.entries(scopeLabels).map(([value, label]) => <option value={value} key={value}>{label}</option>)}
             </select>
           </label>
+          {scope === 'selected' && (
+            <label className="flex items-start gap-2 rounded-xl bg-surface p-3 text-sm text-foreground">
+              <input type="checkbox" checked={rescoreSelected} onChange={event => setRescoreSelected(event.target.checked)} className="mt-1 h-4 w-4 accent-primary" />
+              <span>也重新评分已选的低分 / 已评分岗位；命中预筛排除词的岗位仍不会调用 AI。</span>
+            </label>
+          )}
           <label className="block text-xs font-bold text-muted">
             数量（输入正整数，或输入“全部”）
             <input value={limitText} onChange={event => setLimitText(event.target.value)} className="mt-1 w-full rounded-xl border border-card-border bg-surface px-3 py-2 text-sm text-foreground outline-none focus:border-primary" />
@@ -161,10 +179,12 @@ export function ScoreJobsDialog({ open, selectedJobIds, onClose, onStart }: Scor
             <div className="grid grid-cols-2 gap-2 text-sm">
               <Metric label="符合条件" value={preview.eligible_jobs} />
               <Metric label="将跳过" value={preview.skipped_jobs} />
+              <Metric label="预筛拦截（不调用 AI）" value={preview.prefiltered_jobs || 0} />
               <Metric label="首轮最多请求" value={preview.first_attempt_requests} />
               <Metric label="考虑重试最大请求" value={preview.max_possible_requests} />
             </div>
           )}
+          {preview && preview.prefiltered_jobs > 0 && <p className="text-xs leading-5 text-warning-strong">{preview.note} 如需对这些岗位调用 AI，请先在配置中调整对应的排除条件。</p>}
           <div className="rounded-2xl border border-warning-border bg-warning-soft p-3 text-xs leading-5 text-warning-strong">
             基础预览不会调用 AI。正式评分会产生模型请求；单岗位格式错误会记录并继续，鉴权、额度、模型或连续网络错误会安全暂停。
           </div>
@@ -177,7 +197,7 @@ export function ScoreJobsDialog({ open, selectedJobIds, onClose, onStart }: Scor
           {message && <div className="rounded-xl bg-secondary px-3 py-2 text-sm text-primary">{message}</div>}
           <div className="flex justify-end gap-2">
             <Button variant="secondary" onClick={onClose}>取消</Button>
-            <Button onClick={start} disabled={loading || !limitValid || !preview?.eligible_jobs || Boolean(activeRun)}>{loading ? '处理中...' : '确认开始评分'}</Button>
+            <Button onClick={start} disabled={loading || !limitValid || !preview?.eligible_jobs || (scope === 'selected' && !preview.first_attempt_requests) || Boolean(activeRun)}>{loading ? '处理中...' : '确认开始评分'}</Button>
           </div>
         </div>
       </div>

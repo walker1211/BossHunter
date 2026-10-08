@@ -53,6 +53,14 @@ export function JobFilterBar({
           <option value="3d">近 3 天</option>
           <option value="7d">近 7 天</option>
         </Select>
+        <Select className={controlClass} value={filters.hrActiveWithin} onChange={event => update('hrActiveWithin', event.target.value)} aria-label="招聘者活跃时间" title="按采集时记录的 HR 活跃状态筛选，不代表实时状态；未知不计入近 N 天">
+          <option value="">招聘者活跃：全部</option>
+          <option value="1d">近 1 天活跃</option>
+          <option value="3d">近 3 天活跃</option>
+          <option value="7d">近 7 天活跃</option>
+          <option value="30d">近 30 天活跃</option>
+          <option value="unknown">活跃度未知</option>
+        </Select>
         <Select className={controlClass} value={filters.minScore} onChange={event => update('minScore', event.target.value)} aria-label="最低评分">
           <option value="">最低评分：不限</option>
           <option value="60">60+</option>
@@ -97,6 +105,14 @@ export function JobFilterBar({
         <MultiSelect className={cn(controlClass, compact && 'xl:order-1')} compact={compact} value={filters.recruitmentType} onChange={value => updateMulti('recruitmentType', value)} placeholder="招聘类型：全部" options={[
           { value: 'campus', label: '校招' }, { value: 'experienced', label: '社招' }, { value: 'unknown', label: '未识别' },
         ]} />
+        <Select className={cn(controlClass, compact && 'xl:order-1')} value={filters.workSchedule} onChange={event => update('workSchedule', event.target.value)} aria-label="休息安排">
+          <option value="">休息安排：全部</option>
+          <option value="double">文案称双休</option>
+          <option value="alternate">文案称大小周</option>
+          <option value="single">文案称单休</option>
+          <option value="unclear">表述冲突</option>
+          <option value="unknown">未说明</option>
+        </Select>
         <div className={cn("flex min-w-0 items-center gap-2", compact ? "col-span-2 justify-end xl:col-span-1" : "min-h-9 flex-wrap justify-between rounded-md border border-card-border bg-card px-3 py-1")}>
           {!compact && <span className="whitespace-nowrap text-xs font-bold text-muted">筛选结果 {resultCount} / 总数 {totalCount}</span>}
           <Button
@@ -111,6 +127,7 @@ export function JobFilterBar({
           </Button>
         </div>
       </div>
+      {filters.hrActiveWithin && <p className="mt-2 text-xs text-muted">按采集时记录的 HR 活跃状态筛选，不代表实时状态；未知不计入近 N 天。</p>}
       {invalidSalary && <p className="mt-2 text-xs font-bold text-danger">最低薪资不能高于最高薪资，请调整后再筛选。</p>}
     </div>
   )

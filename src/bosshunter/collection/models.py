@@ -47,6 +47,7 @@ class JobCandidate:
     company: str
     salary: str = ""
     city: str = ""
+    work_location: str = ""
     city_code: str = ""
     experience: str = ""
     education: str = ""
@@ -73,6 +74,7 @@ class JobCandidate:
             "company": self.company,
             "salary": self.salary,
             "city": self.city,
+            "work_location": self.work_location,
             "source_city_code": self.city_code,
             "experience": self.experience,
             "education": self.education,

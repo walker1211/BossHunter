@@ -94,10 +94,12 @@ class BossCollectorUnitTests(TestCase):
         self.assertIn(".job-card-wrap", JS_EXTRACT_LIST)
         self.assertIn(".job-name", JS_EXTRACT_LIST)
         self.assertIn(".job-salary", JS_EXTRACT_LIST)
+        self.assertIn(".company-location", JS_EXTRACT_LIST)
 
     def test_detail_script_targets_jd(self):
         self.assertIn(".job-sec-text", JS_EXTRACT_DETAIL)
         self.assertIn(".info-primary", JS_EXTRACT_DETAIL)
+        self.assertIn("工作地址", JS_EXTRACT_DETAIL)
 
     def test_risk_detection_covers_captcha_and_block(self):
         self.assertIn("captcha", JS_DETECT_COLLECTION_RISK)
@@ -112,6 +114,7 @@ class BossCollectorCollectionTests(TestCase):
             list_jobs = []
         if detail is None:
             detail = {}
+        detail = {"city": "北京", **detail}
         risk_raw = json.dumps({"risk": risk}) if risk else json.dumps({"risk": None})
 
         def evaluate(_target, script):
@@ -235,6 +238,8 @@ class BossCollectorCollectionTests(TestCase):
             "education": "本科",
             "jd": "负责 AI 平台开发与维护。",
             "recruitment_type": "experienced",
+            "work_location": "深圳宝安区海纳百川大厦B座",
+            "city": "深圳",
             "hr_name": "HR",
             "hr_title": "招聘经理",
         }
@@ -244,7 +249,7 @@ class BossCollectorCollectionTests(TestCase):
             browser=browser,
             throttle_factory=lambda **_kw: self._make_throttle(),
         ).collect(
-            PlatformCollectionRequest("boss", ["AI"], ["北京"], {"北京": "101010100"}, max_pages=1),
+            PlatformCollectionRequest("boss", ["AI"], ["深圳"], {"深圳": "101280600"}, max_pages=1),
             hooks,
         )
         self.assertEqual(result.status, "completed")
@@ -253,7 +258,39 @@ class BossCollectorCollectionTests(TestCase):
         self.assertEqual(collected[0].title, "AI 工程师")
         self.assertEqual(collected[0].company, "示例科技")
         self.assertIn("AI 平台开发", collected[0].jd)
+        self.assertEqual(collected[0].work_location, "深圳宝安区海纳百川大厦B座")
         self.assertEqual(collected[0].source_job_id, "abc123")
+
+    def test_detail_city_outside_search_city_is_not_collected(self):
+        browser = self._make_browser(
+            list_jobs=[{"title": "PHP 工程师", "company": "示例公司", "salary": "20-30K",
+                        "location": "深圳南山区", "url": "/job_detail/other-city.html"}],
+            detail={"title": "PHP 工程师", "company": "示例公司", "jd": "负责开发",
+                    "city": "北京", "work_location": "北京海淀区"},
+        )
+        hooks, collected = self._make_hooks()
+        result = BossCollector(browser=browser, sleep=lambda _: None,
+                               throttle_factory=lambda **_kw: self._make_throttle()).collect(
+            PlatformCollectionRequest("boss", ["PHP"], ["深圳"], {"深圳": "101280600"}, max_pages=1),
+            hooks,
+        )
+        self.assertEqual(result.reason_code, "search_exhausted")
+        self.assertEqual(collected, [])
+
+    def test_missing_detail_city_and_address_is_not_assumed_from_search(self):
+        browser = self._make_browser(
+            list_jobs=[{"title": "PHP 工程师", "company": "示例公司", "salary": "20-30K",
+                        "url": "/job_detail/unknown-city.html"}],
+            detail={"title": "PHP 工程师", "company": "示例公司", "jd": "负责开发", "city": ""},
+        )
+        hooks, collected = self._make_hooks()
+        result = BossCollector(browser=browser, sleep=lambda _: None,
+                               throttle_factory=lambda **_kw: self._make_throttle()).collect(
+            PlatformCollectionRequest("boss", ["PHP"], ["深圳"], {"深圳": "101280600"}, max_pages=1),
+            hooks,
+        )
+        self.assertEqual(result.reason_code, "incomplete_search")
+        self.assertEqual(collected, [])
 
     def test_callback_stop_ends_collection(self):
         list_jobs = [
@@ -293,6 +330,7 @@ class BossCollectorCollectionTests(TestCase):
             "title": "Python 开发",
             "salary": "20-30K",
             "company": "测试公司",
+            "location": "北京海淀区",
             "experience": "1-3年",
             "education": "本科",
             "url": "/job_detail/xyz789.html",
@@ -343,11 +381,13 @@ class BossCollectorCollectionTests(TestCase):
             company="示例科技",
             url="/job_detail/abc123.html",
             source_keyword="AI",
+            work_location="深圳·宝安区",
         )
         detail = {"jd": "负责开发。"}
         merged = BossCollector._merge_detail(base, detail, "https://www.zhipin.com/job_detail/abc123.html")
         self.assertEqual(merged.title, "AI 工程师")
         self.assertEqual(merged.company, "示例科技")
+        self.assertEqual(merged.work_location, "深圳·宝安区")
 
 
 class BossFreshSearchTests(TestCase):
@@ -380,7 +420,7 @@ class BossFreshSearchTests(TestCase):
             if script == JS_EXTRACT_DETAIL:
                 if crash and current["url"].endswith("/d.html"):
                     raise PowerLoss()
-                return json.dumps({"title": "AI 工程师", "company": "测试公司", "jd": "负责开发"})
+                return json.dumps({"title": "AI 工程师", "company": "测试公司", "city": "北京", "jd": "负责开发"})
             return "{}"
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -567,7 +607,7 @@ class BossFreshSearchTests(TestCase):
         if list_jobs is None:
             list_jobs = []
         if detail is None:
-            detail = {"title": "AI 工程师", "company": "测试公司", "jd": "负责开发"}
+            detail = {"title": "AI 工程师", "company": "测试公司", "city": "北京", "jd": "负责开发"}
         risk_raw = json.dumps({"risk": risk}) if risk else json.dumps({"risk": None})
 
         def evaluate(_target, script):
