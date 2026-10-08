@@ -1162,7 +1162,7 @@ def _score_trace_missing_state(job: dict) -> str:
 
 def _query_values(name: str) -> list[str]:
 	"""Read repeated query values while keeping the old single-value form valid."""
-	values = request.query.getall(name)
+	values = request.query.decode().getall(name)
 	return [str(value).strip() for value in values if str(value).strip()]
 
 

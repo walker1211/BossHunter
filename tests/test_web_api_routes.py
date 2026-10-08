@@ -6,7 +6,7 @@ import unittest
 from socketserver import ThreadingMixIn
 from datetime import datetime, timedelta
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 from unittest.mock import MagicMock, patch
 from wsgiref.simple_server import WSGIServer
 from zipfile import ZipFile
@@ -1004,6 +1004,42 @@ class WebApiRouteTests(unittest.TestCase):
         payload = json.loads(body)
         self.assertTrue(status.startswith("200"), body)
         self.assertCountEqual([job["id"] for job in payload["items"]], ["zhilian-filtered", "boss-ready"])
+
+    def test_job_search_decodes_repeated_education_with_hr_activity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base_dir = Path(tmp)
+            db = get_db(base_dir / "data" / "bosshunter.db")
+            try:
+                fixtures = [
+                    ("bachelor", "本科", "今日活跃"),
+                    ("college", "大专", "在线"),
+                    ("unrestricted", "不限", "刚刚活跃"),
+                    ("other-education", "博士", "今日活跃"),
+                    ("stale-bachelor", "本科", "近7天活跃"),
+                ]
+                for job_id, education, activity in fixtures:
+                    insert_job(db, {**_job(job_id), "education": education, "hr_active": activity})
+            finally:
+                db.close()
+            server.set_base_dir(base_dir)
+
+            query = urlencode([
+                ("education", "本科"), ("education", "大专"), ("education", "不限"),
+                ("hr_active_within", "1d"),
+            ])
+            self.assertIn("%", query)
+            status, _, body = self._request(f"/api/jobs/search?{query}")
+            single_status, _, single_body = self._request(
+                f"/api/jobs/search?{urlencode({'education': '本科', 'hr_active_within': '1d'})}"
+            )
+
+        self.assertTrue(status.startswith("200"), body)
+        payload = json.loads(body)
+        self.assertCountEqual([job["id"] for job in payload["items"]], ["bachelor", "college", "unrestricted"])
+        self.assertEqual(payload["total"], 3)
+        self.assertEqual(payload["all_total"], 5)
+        self.assertTrue(single_status.startswith("200"), single_body)
+        self.assertEqual([job["id"] for job in json.loads(single_body)["items"]], ["bachelor"])
 
     def test_job_search_filters_posting_schedule_claim(self):
         with tempfile.TemporaryDirectory() as tmp:
