@@ -6,10 +6,14 @@ import csv
 from copy import copy
 import io
 import json
+import math
+import re
 import sqlite3
 from typing import Any, Iterable
+from urllib.parse import urljoin, urlsplit
 
 from bosshunter.cities import get_city_code
+from bosshunter.db import normalize_commute_source_url
 from bosshunter.job_filters import matches_hr_activity, parse_monthly_salary_k, validate_hr_activity_filter
 
 
@@ -25,8 +29,17 @@ EXPORT_COLUMNS = [
 	("公司", "company"),
 	("薪资", "salary"),
 	("城市", "city"),
-	("休息安排（职位文案）", "work_schedule_label"),
+	("办公地点", "work_location"),
+	("通勤起点", "commute_origin"),
+	("单程分钟", "commute_minutes"),
+	("路线公里数", "commute_distance_km"),
+	("通勤方式", "commute_mode"),
+	("地图路线链接", "commute_source_url"),
+	("通勤核查日期", "commute_checked_at"),
+	("休息安排", "work_schedule_label"),
+	("休息安排来源", "work_schedule_source_label"),
 	("休息安排依据", "work_schedule_evidence"),
+	("公司页链接", "company_url"),
 	("平台城市编码", "platform_city_code"),
 	("工作经验", "experience"),
 	("学历要求", "education"),
@@ -244,20 +257,67 @@ def _greeting_failure_reason(job: dict[str, Any]) -> str:
 	return ""
 
 
+def _safe_company_url(value: Any) -> str:
+	text = str(value or "").strip()
+	if not text:
+		return ""
+	try:
+		parsed = urlsplit(urljoin("https://www.zhipin.com", text))
+		valid = (
+			parsed.scheme == "https"
+			and parsed.hostname in {"zhipin.com", "www.zhipin.com"}
+			and not parsed.username and not parsed.password and parsed.port is None
+			and re.fullmatch(r"/gongsi/[A-Za-z0-9_~-]+\.html", parsed.path)
+		)
+	except ValueError:
+		return ""
+	return f"https://www.zhipin.com{parsed.path}" if valid else ""
+
+
+def _safe_commute_source_url(value: Any) -> str:
+	try:
+		return normalize_commute_source_url(value)
+	except ValueError:
+		return ""
+
+
+def _commute_distance_km(value: Any) -> str:
+	if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0 or not float(value).is_integer():
+		return ""
+	if value == 0:
+		return "0"
+	rounded = math.floor(value / 100 + 0.5) / 10
+	return "<0.1" if rounded == 0 else f"{rounded:.1f}"
+
+
 def _row_values(job: dict[str, Any]) -> list[Any]:
 	platform = str(job.get("source_platform") or "boss").strip() or "boss"
 	platform_labels = {"boss": "BOSS 直聘", "zhilian": "智联招聘", "51job": "前程无忧", "liepin": "猎聘"}
 	city_code = str(job.get("source_city_code") or "").strip()
 	if not city_code and platform == "boss":
 		city_code = str(job.get("city_code") or "").strip() or (get_city_code(str(job.get("city") or "")) or "")
+	schedule_source = str(job.get("work_schedule_source") or "")
+	schedule = str(job.get("work_schedule") or "")
+	schedule_label = {"double": "双休", "alternate": "大小周", "single": "单休"}.get(schedule)
+	if schedule_label:
+		prefix = {
+			"company_profile": "公司页称", "manual": "人工记录称", "job_posting": "文案称", "": "文案称",
+		}.get(schedule_source, "来源称")
+		schedule_label = prefix + schedule_label
+	else:
+		schedule_label = "表述冲突" if schedule == "unclear" else "未说明"
+	source_label = {
+		"job_posting": "职位文案", "company_profile": "公司页（福利/简介）", "manual": "人工记录",
+	}.get(schedule_source, f"其他来源（{schedule_source}）" if schedule_source else "未记录")
 	job = {
 		**job,
 		"source_platform_label": platform_labels.get(platform, platform),
 		"platform_city_code": city_code,
-		"work_schedule_label": {
-			"double": "文案称双休", "alternate": "文案称大小周", "single": "文案称单休",
-			"unclear": "表述冲突",
-		}.get(str(job.get("work_schedule") or ""), "未说明"),
+		"work_schedule_label": schedule_label,
+		"work_schedule_source_label": source_label,
+		"company_url": _safe_company_url(job.get("company_url")),
+		"commute_distance_km": _commute_distance_km(job.get("commute_distance_m")),
+		"commute_source_url": _safe_commute_source_url(job.get("commute_source_url")),
 		"recruitment_type_label": {"campus": "校招", "experienced": "社招"}.get(
 			str(job.get("recruitment_type") or ""), "未识别"
 		),

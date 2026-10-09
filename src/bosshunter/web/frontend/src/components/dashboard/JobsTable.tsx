@@ -5,7 +5,8 @@ import { Badge } from '@/components/ui/badge'
 import { CheckCircle2, ChevronDown, ChevronUp, ExternalLink, Trash2 } from 'lucide-react'
 import { getStatusLabel } from '@/lib/status'
 import { PLATFORM_SHORT_LABELS } from '@/lib/platforms'
-import { workScheduleLabel } from '@/lib/workSchedule'
+import { safeCompanyProfileUrl, workScheduleDescription, workScheduleLabel, workScheduleSourceLabel } from '@/lib/workSchedule'
+import { commuteDescription, commuteLabel, safeCommuteSourceUrl } from '@/lib/commute'
 import type { Job } from '@/hooks/useDashboard'
 import type { JobSortKey, JobSortOrder } from '@/hooks/useJobSearch'
 
@@ -127,11 +128,11 @@ export function JobsTable({ jobs, page, pageSize, total, onPageChange, selectedI
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
-              <tr className="border-b border-card-border bg-secondary text-xs text-muted">
+              <tr className="whitespace-nowrap border-b border-card-border bg-secondary text-xs text-muted">
                 <th className="w-10 px-3 py-3 text-center font-bold">选</th>
                 <th className="px-4 py-3 text-left font-bold">公司</th>
                 <th className="px-4 py-3 text-left font-bold">职位</th>
-                <th className="px-4 py-3 text-left font-bold">城市</th>
+                <th className="px-4 py-3 text-left font-bold">城市 / 通勤</th>
                 <th className="px-4 py-3 text-left font-bold">休息安排</th>
                 <th className="px-4 py-3 text-left">{sortableHeader('薪资', 'salary')}</th>
                 <th className="px-4 py-3 text-left">{sortableHeader('学历 / 招聘类型', 'education')}</th>
@@ -147,6 +148,8 @@ export function JobsTable({ jobs, page, pageSize, total, onPageChange, selectedI
                 const isExpanded = expanded === job.id
                 const isExternalPlatform = job.source_platform === 'zhilian' || job.source_platform === '51job' || job.source_platform === 'liepin'
                 const jobUrl = safeJobUrl(job)
+                const companyProfileUrl = safeCompanyProfileUrl(job.company_url)
+                const commuteSourceUrl = safeCommuteSourceUrl(job.commute_source_url)
                 const alreadySent = ['sent', 'replied', 'resume_sent', 'needs_resume', 'follow_up_sent'].includes(job.status)
                 return (
                   <Fragment key={job.id}>
@@ -165,7 +168,17 @@ export function JobsTable({ jobs, page, pageSize, total, onPageChange, selectedI
                       </td>
                       <td className="px-4 py-3">
                         <div className="flex items-center gap-2">
-                          <span className="max-w-[160px] truncate font-black text-foreground">{job.company}</span>
+                          <button
+                            type="button"
+                            className="max-w-[160px] truncate rounded text-left font-black text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
+                            aria-expanded={isExpanded}
+                            aria-controls={isExpanded ? `job-details-${job.id}` : undefined}
+                            aria-label={`${isExpanded ? '收起' : '展开'} ${job.company} ${job.title} 详情`}
+                            onClick={event => {
+                              event.stopPropagation()
+                              setExpanded(isExpanded ? null : job.id)
+                            }}
+                          >{job.company}</button>
                           <span className={`rounded-full px-2 py-0.5 text-[10px] font-black ${job.source_platform === 'boss' || !job.source_platform ? 'bg-secondary text-primary' : 'bg-info-soft text-info'}`}>
                             {PLATFORM_SHORT_LABELS[job.source_platform || 'boss'] || 'BOSS'}
                           </span>
@@ -176,8 +189,11 @@ export function JobsTable({ jobs, page, pageSize, total, onPageChange, selectedI
                         </div>
                       </td>
                       <td className="max-w-[220px] truncate px-4 py-3 font-bold text-foreground">{job.title}</td>
-                      <td className="px-4 py-3 text-muted">{job.city || '未识别'}</td>
-                      <td className="whitespace-nowrap px-4 py-3 text-xs text-muted" title={job.work_schedule_evidence || '职位未说明休息安排'}>{workScheduleLabel(job.work_schedule)}</td>
+                      <td className="px-4 py-3 text-muted">
+                        <div>{job.city || '未识别'}</div>
+                        <div className="mt-1 whitespace-nowrap text-xs" title={commuteDescription(job)}>{commuteLabel(job)}</div>
+                      </td>
+                      <td className="whitespace-nowrap px-4 py-3 text-xs text-muted" title={`信息来源：${workScheduleSourceLabel(job.work_schedule_source)}；原文依据：${job.work_schedule_evidence || '未记录'}；尚未向招聘方核实`}>{workScheduleLabel(job.work_schedule, job.work_schedule_source)}</td>
                       <td className="px-4 py-3 text-muted">{job.salary || '-'}</td>
                       <td className="px-4 py-3 text-xs">
                         <div className="font-bold text-foreground">{job.education || '学历未识别'}</div>
@@ -189,7 +205,7 @@ export function JobsTable({ jobs, page, pageSize, total, onPageChange, selectedI
                           : <span className={`font-mono font-black ${getScoreColor(job.score)}`}>{job.score || '-'}</span>}
                       </td>
                       <td className="px-4 py-3">
-                        <Badge variant={statusVariant(job.status) as any}>{getStatusLabel(job.status)}</Badge>
+                        <Badge className="whitespace-nowrap" variant={statusVariant(job.status) as any}>{getStatusLabel(job.status)}</Badge>
                       </td>
                       <td className="px-4 py-3">
                         <Badge className="whitespace-nowrap" title="采集时记录的 HR 活跃状态，不代表实时状态">
@@ -257,7 +273,7 @@ export function JobsTable({ jobs, page, pageSize, total, onPageChange, selectedI
                     </tr>
                     {isExpanded && (
                       <tr className="border-b border-card-border bg-surface">
-                        <td colSpan={hasActions ? 12 : 11} className="px-6 py-4">
+                        <td id={`job-details-${job.id}`} colSpan={hasActions ? 12 : 11} className="px-6 py-4">
                           <div className="grid grid-cols-1 gap-4 text-sm lg:grid-cols-3">
                             <div className="rounded-2xl border border-card-border bg-card p-4">
                               <p className="mb-2 text-xs font-black text-primary">JD摘要</p>
@@ -270,6 +286,22 @@ export function JobsTable({ jobs, page, pageSize, total, onPageChange, selectedI
                             <div className="rounded-2xl border border-card-border bg-card p-4">
                               <p className="mb-2 text-xs font-black text-primary">评分理由</p>
                               <p className="line-clamp-6 whitespace-pre-wrap leading-6 text-muted">{job.score_reason || '无'}</p>
+                            </div>
+                          </div>
+                          <div className="mt-3 grid gap-3 lg:grid-cols-2">
+                            <div className="rounded-2xl border border-card-border bg-card p-4">
+                              <p className="text-xs font-black text-primary">休息安排及依据</p>
+                              <p className="mt-2 leading-6 text-muted">{workScheduleDescription(job.work_schedule, job.work_schedule_source)}</p>
+                              <p className="mt-1 whitespace-pre-wrap leading-6 text-muted">原文依据：{job.work_schedule_evidence || '未记录'}</p>
+                              {companyProfileUrl && (
+                                <a href={companyProfileUrl} target="_blank" rel="noopener noreferrer" className="mt-2 inline-block font-bold text-primary underline">原公司页链接</a>
+                              )}
+                            </div>
+                            <div className="rounded-2xl border border-card-border bg-card p-4">
+                              <p className="text-xs font-black text-primary">办公地点与通勤</p>
+                              <p className="mt-2 leading-6 text-muted">办公地点：{job.work_location || '未采集'}</p>
+                              <p className="mt-1 leading-6 text-muted">{commuteDescription(job)}</p>
+                              {commuteSourceUrl && <a href={commuteSourceUrl} target="_blank" rel="noopener noreferrer" className="mt-2 inline-block rounded text-primary underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary">查看原地图路线</a>}
                             </div>
                           </div>
                         </td>

@@ -28,6 +28,7 @@ from bosshunter.db import (
     reject_jobs,
     save_generated_greeting,
     update_job_greeting,
+    update_job_commute,
     update_job_score,
     update_job_status,
 )
@@ -447,6 +448,11 @@ class WebApiRouteTests(unittest.TestCase):
             db = get_db(base_dir / "data" / "bosshunter.db")
             try:
                 insert_job(db, _job("agent-evaluation"))
+                update_job_commute(
+                    db, "agent-evaluation", origin="示例地铁站", minutes=42, distance_m=12300,
+                    mode="公共交通", source_url="https://uri.amap.com/navigation?from=1,2,start&to=3,4,end&mode=bus",
+                    checked_at="2026-10-01T09:00:00+08:00",
+                )
             finally:
                 db.close()
 
@@ -457,6 +463,9 @@ class WebApiRouteTests(unittest.TestCase):
             self.assertTrue(context_status.startswith("200"), context_body)
             self.assertEqual(context["resume"]["content"], "# Resume\nBuilt AI product features.")
             self.assertEqual(context["items"][0]["id"], "agent-evaluation")
+            self.assertEqual(context["items"][0]["commute"]["distance_m"], 12300)
+            self.assertEqual(context["items"][0]["commute"]["minutes"], 42)
+            self.assertNotIn("source_url", context["items"][0]["commute"])
 
             submit_status, _, submit_body = self._request(
                 "/api/agent/evaluations",

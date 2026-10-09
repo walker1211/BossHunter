@@ -4,7 +4,8 @@ import { useDashboard, type CollectionProgress, type HistoryItem, type Job, type
 import { useJobSearch, type JobSortKey, type JobSortOrder } from '@/hooks/useJobSearch'
 import { Button } from '@/components/ui/button'
 import { JobsTable } from '@/components/dashboard/JobsTable'
-import { workScheduleDescription } from '@/lib/workSchedule'
+import { safeCompanyProfileUrl, workScheduleDescription, workScheduleSourceLabel } from '@/lib/workSchedule'
+import { commuteDescription, safeCommuteSourceUrl } from '@/lib/commute'
 import { RecycleBinPanel } from '@/components/dashboard/RecycleBinPanel'
 import { ScoreJobsDialog } from '@/components/dashboard/ScoreJobsDialog'
 import { CollectJobsDialog } from '@/components/dashboard/CollectJobsDialog'
@@ -1440,6 +1441,8 @@ function JobDetailModal({ job, onClose, onChanged }: { job: Job; onClose: () => 
   const [notice, setNotice] = useState('')
   const [reviewed, setReviewed] = useState(Boolean(job.greeting_reviewed_at))
   const [selectionPending, setSelectionPending] = useState(job.greeting_selection === 'pending')
+  const companyProfileUrl = job.work_schedule_source === 'company_profile' ? safeCompanyProfileUrl(job.company_url) : null
+  const commuteSourceUrl = safeCommuteSourceUrl(job.commute_source_url)
 
   const saveGreeting = async () => {
     const text = greeting.trim()
@@ -1544,9 +1547,22 @@ function JobDetailModal({ job, onClose, onChanged }: { job: Job; onClose: () => 
           <InfoBlock label="招聘者活跃" value={job.hr_active || '活跃度未知'} />
           <InfoBlock label="公司" value={[job.company_size, job.company_industry].filter(Boolean).join(' · ') || '-'} />
           <InfoBlock label="办公区域" value={job.work_location || '未采集；通勤待核实'} />
-          <InfoBlock label="休息安排" value={workScheduleDescription(job.work_schedule)} />
-          {job.work_schedule_evidence && <InfoBlock label="文案依据" value={job.work_schedule_evidence} />}
-          <InfoBlock label="单程通勤" value={job.commute_minutes != null && job.commute_origin ? `从${job.commute_origin}约 ${job.commute_minutes} 分钟（${job.commute_mode || '公共交通'}，地图估算${job.commute_checked_at ? `，核于 ${job.commute_checked_at.slice(0, 10)}` : ''}）` : '待核实'} />
+          <InfoBlock label="休息安排" value={workScheduleDescription(job.work_schedule, job.work_schedule_source)} />
+          <InfoBlock label="信息来源" value={workScheduleSourceLabel(job.work_schedule_source)} />
+          <InfoBlock label="原文依据" value={job.work_schedule_evidence || '未记录'} />
+          {companyProfileUrl && (
+            <div className="rounded-2xl border border-card-border bg-surface p-4">
+              <div className="text-xs text-muted">公司页链接</div>
+              <a href={companyProfileUrl} target="_blank" rel="noopener noreferrer" className="mt-1 inline-block font-bold text-primary underline">原公司页链接</a>
+            </div>
+          )}
+          <InfoBlock label="单程通勤" value={commuteDescription(job)} />
+          {commuteSourceUrl && (
+            <div className="rounded-2xl border border-card-border bg-surface p-4">
+              <div className="text-xs text-muted">地图路线来源</div>
+              <a href={commuteSourceUrl} target="_blank" rel="noopener noreferrer" className="mt-1 inline-block rounded font-bold text-primary underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary">查看原地图路线</a>
+            </div>
+          )}
           <InfoBlock label="来源平台" value={job.source_platform && job.source_platform !== 'boss' && PLATFORM_LABELS[job.source_platform] ? `${PLATFORM_LABELS[job.source_platform]}｜当前只开放采集` : 'BOSS 直聘'} />
           <InfoBlock label="匹配分" value={job.status === 'filtered' && job.score === 0 && job.score_reason?.startsWith('预筛不通过:') ? '预筛未评（未调用 AI）' : String(job.score || '-')} />
           <InfoBlock label="定制简历" value={job.resume_path || '未生成'} />

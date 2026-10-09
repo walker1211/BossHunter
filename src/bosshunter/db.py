@@ -5,6 +5,7 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qsl, urlsplit
 
 from bosshunter.outsourcing import (
     OUTSOURCING_COMPANIES,
@@ -483,7 +484,9 @@ def insert_job_if_new(
     table consistent without forcing every caller to plumb a Rules
     instance.
     """
-    schedule, schedule_source, schedule_evidence = infer_work_schedule(job.get("title", ""), job.get("jd", ""))
+    schedule, schedule_source, schedule_evidence = infer_work_schedule(
+        job.get("title", ""), job.get("jd", ""), job.get("company_work_schedule", "")
+    )
     values = {
         "id": str(job.get("id") or ""),
         "title": str(job.get("title") or ""),
@@ -507,6 +510,8 @@ def insert_job_if_new(
         "hr_active": job.get("hr_active", ""),
         "company_size": job.get("company_size", ""),
         "company_industry": job.get("company_industry", ""),
+        "company_url": job.get("company_url", ""),
+        "company_work_schedule": job.get("company_work_schedule", ""),
         "url": job.get("url", ""),
         "source_platform": str(job.get("source_platform") or "boss"),
         "source_job_id": str(job.get("source_job_id") or "") or None,
@@ -527,14 +532,16 @@ def insert_job_if_new(
         INSERT OR IGNORE INTO jobs (
             id, title, company, salary, city, work_location, work_schedule, work_schedule_source,
             work_schedule_evidence, experience, education, recruitment_type, jd,
-            hr_name, hr_title, hr_active, company_size, company_industry, url,
+            hr_name, hr_title, hr_active, company_size, company_industry, company_url,
+            company_work_schedule, url,
             source_platform, source_job_id, source_keyword, source_city_code,
             outsourcing_level, outsourcing_confirmed, outsourcing_matches,
             outsourcing_layers, outsourcing_updated_at, outsourcing_rules_version
         ) VALUES (
             :id, :title, :company, :salary, :city, :work_location, :work_schedule, :work_schedule_source,
             :work_schedule_evidence, :experience, :education, :recruitment_type, :jd,
-            :hr_name, :hr_title, :hr_active, :company_size, :company_industry, :url,
+            :hr_name, :hr_title, :hr_active, :company_size, :company_industry, :company_url,
+            :company_work_schedule, :url,
             :source_platform, :source_job_id, :source_keyword, :source_city_code,
             :outsourcing_level, :outsourcing_confirmed, :outsourcing_matches,
             :outsourcing_layers, :outsourcing_updated_at, :outsourcing_rules_version
@@ -554,6 +561,107 @@ def insert_job(
 ) -> bool:
     """Backward-compatible insert entry point; returns whether it was new."""
     return insert_job_if_new(conn, job, rules=rules)
+
+
+_AMAP_ROUTE_PARAMETERS = {
+    "r", "from", "to", "mode", "policy", "src", "callnative", "type", "innersrc",
+    "from[name]", "from[lnglat]", "to[name]", "to[lnglat]",
+}
+
+
+def normalize_commute_source_url(source_url: str) -> str:
+    """Accept public Amap route links without credentials or embedded fragments."""
+    if not isinstance(source_url, str) or not source_url or source_url != source_url.strip():
+        raise ValueError("无效的地图路线链接")
+    if any(ord(char) < 33 or ord(char) == 127 for char in source_url):
+        raise ValueError("无效的地图路线链接")
+    try:
+        parsed = urlsplit(source_url)
+        valid = (
+            parsed.scheme == "https"
+            and parsed.username is None and parsed.password is None
+            and parsed.port is None and not parsed.fragment
+            and (
+                (parsed.hostname == "www.amap.com" and parsed.path == "/")
+                or (parsed.hostname == "uri.amap.com" and parsed.path == "/navigation")
+                or (parsed.hostname == "ditu.amap.com" and parsed.path == "/dir")
+            )
+        )
+        if valid:
+            valid = all(key in _AMAP_ROUTE_PARAMETERS for key, _ in parse_qsl(
+                parsed.query, keep_blank_values=True, strict_parsing=True,
+            ))
+    except (ValueError, UnicodeError):
+        valid = False
+    if not valid:
+        raise ValueError("无效的地图路线链接")
+    return source_url
+
+
+def update_job_commute(
+    conn: sqlite3.Connection,
+    job_id: str,
+    *,
+    origin: str,
+    minutes: int | None,
+    distance_m: int | None,
+    mode: str,
+    source_url: str,
+    checked_at: str,
+) -> bool:
+    """Store one checked route estimate without changing job workflow state."""
+    if not isinstance(origin, str) or not origin.strip():
+        raise ValueError("无效的通勤起点")
+    if not isinstance(mode, str) or not mode.strip():
+        raise ValueError("无效的出行方式")
+    if not isinstance(checked_at, str) or not checked_at.strip():
+        raise ValueError("无效的核验时间")
+    try:
+        datetime.fromisoformat(checked_at.strip().replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError("无效的核验时间") from exc
+    if minutes is None and distance_m is None:
+        raise ValueError("缺少通勤时间或距离")
+    if (minutes is not None and (type(minutes) is not int or not 0 <= minutes <= 1440)):
+        raise ValueError("无效的通勤时间")
+    if (distance_m is not None and (type(distance_m) is not int or not 0 <= distance_m <= 1000000)):
+        raise ValueError("无效的通勤距离")
+    normalized_url = normalize_commute_source_url(source_url)
+    cursor = conn.execute(
+        "UPDATE jobs SET commute_origin = ?, commute_minutes = ?, commute_distance_m = ?, "
+        "commute_mode = ?, commute_source_url = ?, commute_checked_at = ? "
+        "WHERE id = ? AND deleted_at IS NULL",
+        (origin.strip(), minutes, distance_m, mode.strip(), normalized_url, checked_at.strip(), job_id),
+    )
+    conn.commit()
+    return cursor.rowcount == 1
+
+
+def update_job_work_schedule_from_company(
+    conn: sqlite3.Connection, job_id: str, company_url: str, company_text: str,
+) -> bool:
+    """Fill a visible job's unknown schedule using a company profile claim."""
+    row = conn.execute(
+        "SELECT title, jd, work_schedule, work_schedule_source, work_schedule_evidence FROM jobs "
+        "WHERE id = ? AND deleted_at IS NULL", (job_id,)
+    ).fetchone()
+    if (row is None or (row["work_schedule"] or "unknown") != "unknown"
+            or row["work_schedule_source"] or row["work_schedule_evidence"]):
+        return False
+    posting_schedule, _, _ = infer_work_schedule(row["title"], row["jd"])
+    if posting_schedule != "unknown":
+        return False
+    schedule, source, evidence = infer_work_schedule(row["title"], row["jd"], company_text)
+    cursor = conn.execute(
+        "UPDATE jobs SET company_url = ?, company_work_schedule = ?, "
+        "work_schedule = ?, work_schedule_source = ?, work_schedule_evidence = ? "
+        "WHERE id = ? AND deleted_at IS NULL AND (work_schedule IS NULL OR work_schedule IN ('', 'unknown')) "
+        "AND (work_schedule_source IS NULL OR work_schedule_source = '') "
+        "AND (work_schedule_evidence IS NULL OR work_schedule_evidence = '')",
+        (str(company_url or ""), str(company_text or ""), schedule, source, evidence, job_id),
+    )
+    conn.commit()
+    return cursor.rowcount == 1
 
 
 def update_job_score(conn: sqlite3.Connection, job_id: str, score: int, reason: str) -> None:
@@ -1259,7 +1367,9 @@ def _migrate_work_location(conn: sqlite3.Connection) -> None:
         "work_location": "TEXT DEFAULT ''",
         "commute_origin": "TEXT NULL",
         "commute_minutes": "INTEGER NULL",
+        "commute_distance_m": "INTEGER NULL",
         "commute_mode": "TEXT NULL",
+        "commute_source_url": "TEXT NULL",
         "commute_checked_at": "TIMESTAMP NULL",
     }
     for name, definition in additions.items():
@@ -1269,24 +1379,30 @@ def _migrate_work_location(conn: sqlite3.Connection) -> None:
 
 
 def _migrate_work_schedule(conn: sqlite3.Connection) -> None:
-    """Add posting-claim fields and classify existing jobs once, without touching scores."""
+    """Add claim fields, preserving existing decisions and unrelated job state."""
     cols = {row[1] for row in conn.execute("PRAGMA table_info(jobs)").fetchall()}
     additions = {
         "work_schedule": "TEXT NOT NULL DEFAULT 'unknown'",
         "work_schedule_source": "TEXT NOT NULL DEFAULT ''",
         "work_schedule_evidence": "TEXT NOT NULL DEFAULT ''",
+        "company_url": "TEXT NOT NULL DEFAULT ''",
+        "company_work_schedule": "TEXT NOT NULL DEFAULT ''",
     }
-    needs_backfill = any(name not in cols for name in additions)
+    needs_backfill = any(name not in cols for name in ("work_schedule", "work_schedule_source", "work_schedule_evidence"))
     for name, definition in additions.items():
         if name not in cols:
             conn.execute(f"ALTER TABLE jobs ADD COLUMN {name} {definition}")
     if needs_backfill:
-        for row in conn.execute("SELECT id, title, jd FROM jobs").fetchall():
+        for row in conn.execute(
+            "SELECT id, title, jd FROM jobs "
+            "WHERE work_schedule IN ('', 'unknown') AND work_schedule_source = '' AND work_schedule_evidence = ''"
+        ).fetchall():
             schedule, source, evidence = infer_work_schedule(row["title"], row["jd"])
-            conn.execute(
-                "UPDATE jobs SET work_schedule = ?, work_schedule_source = ?, work_schedule_evidence = ? WHERE id = ?",
-                (schedule, source, evidence, row["id"]),
-            )
+            if schedule != "unknown":
+                conn.execute(
+                    "UPDATE jobs SET work_schedule = ?, work_schedule_source = ?, work_schedule_evidence = ? WHERE id = ?",
+                    (schedule, source, evidence, row["id"]),
+                )
     conn.commit()
 
 

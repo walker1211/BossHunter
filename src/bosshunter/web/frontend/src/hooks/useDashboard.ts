@@ -24,8 +24,12 @@ interface Job {
   work_schedule?: 'double' | 'alternate' | 'single' | 'unclear' | 'unknown'
   work_schedule_source?: string
   work_schedule_evidence?: string
+  company_url?: string
+  company_work_schedule?: string
   commute_origin?: string | null
   commute_minutes?: number | null
+  commute_distance_m?: number | null
+  commute_source_url?: string | null
   commute_mode?: string | null
   commute_checked_at?: string | null
   experience: string

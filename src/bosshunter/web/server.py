@@ -2775,6 +2775,7 @@ def _agent_job_evaluation_context(job: dict) -> dict:
 	context["commute"] = {
 		"origin": str(job.get("commute_origin") or ""),
 		"minutes": job.get("commute_minutes"),
+		"distance_m": job.get("commute_distance_m"),
 		"mode": str(job.get("commute_mode") or ""),
 		"checked_at": str(job.get("commute_checked_at") or ""),
 	}

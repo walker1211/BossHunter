@@ -23,10 +23,17 @@ from bosshunter.collection.platforms.boss_font import (
     collect_font_sources,
     parse_font_face_urls,
 )
+from bosshunter.collection.platforms.boss_company import (
+    BossCompanyScheduleReader,
+    CompanyScheduleStopped,
+    normalize_company_url,
+)
 from bosshunter.config import CITY_CODES
 from bosshunter.db import add_risk_event
+from bosshunter.job_filters import hr_activity_filter_reason, matching_deal_breaker
 from bosshunter.platform_safety import PlatformAccessGuard, PlatformSafetyStop
 from bosshunter.throttle import PageThrottle
+from bosshunter.work_schedule import infer_work_schedule
 
 
 SEARCH_URL = "https://www.zhipin.com/web/geek/job?query={keyword}&city={city_code}"
@@ -224,6 +231,20 @@ JS_EXTRACT_DETAIL = """
         const titleMatch = document.title.match(/_(.+?)招聘/);
         info.company = titleMatch ? titleMatch[1] : '';
     }
+    info.company_url = '';
+    // Company-owned links only: footer recommendations belong to other employers.
+    const profileLinks = document.querySelectorAll(
+        '.sider-company .company-info a[href], .detail-section-item.company-info-box a[href]'
+    );
+    for (const link of profileLinks) {
+        try {
+            const url = new URL(link.getAttribute('href'), location.origin);
+            if (url.origin === location.origin && /^\\/gongsi\\/[A-Za-z0-9_~-]+\\.html$/.test(url.pathname)) {
+                info.company_url = url.origin + url.pathname;
+                break;
+            }
+        } catch { /* Ignore malformed profile links. */ }
+    }
     const companyTags = document.querySelectorAll('.sider-company .res-industry-item, .company-info-item');
     info.company_size = ''; info.company_industry = '';
     companyTags.forEach(tag => {
@@ -246,7 +267,7 @@ JS_DETECT_COLLECTION_RISK = """
     const url = String(location.href || '');
     const title = String(document.title || '');
     const hasExpectedContent = Boolean(document.querySelector(
-        '.job-card-wrap, .job-sec-text, .job-detail, .job-primary'
+        '.job-card-wrap, .job-sec-text, .job-detail, .job-primary, .job-sec.work-time'
     ));
     const captcha = document.querySelector(
         '.geetest_panel, .captcha, [class*="captcha"], [id*="captcha"], iframe[src*="captcha"], iframe[src*="verify"]'
@@ -372,6 +393,11 @@ class BossCollector:
         incomplete_combos = 0
         undecodable_salary: set[str] = set()
         salary_decode_action = _salary_decode_failure_action(self.config)
+        company_reader = BossCompanyScheduleReader(
+            browser=self.browser, throttle=throttle, risk_script=JS_DETECT_COLLECTION_RISK,
+            guard=guard, detail_limit=detail_limit, stop_event=hooks.stop_event,
+            delay_multiplier=delay_multiplier, sleep=self.sleep, on_event=hooks.on_event,
+        )
 
         def limited(reason: str) -> PlatformCollectionResult:
             return PlatformCollectionResult(
@@ -696,6 +722,23 @@ class BossCollector:
                             combo_complete = False
                             hooks.on_parse_failed("BOSS 详情缺少职位、公司、链接或 JD")
                             continue
+                        profile = self.config.get("profile", {})
+                        profile = profile if isinstance(profile, dict) else {}
+                        needs_company = (
+                            merged.company_url and infer_work_schedule(merged.title, merged.jd)[0] == "unknown"
+                            and not hr_activity_filter_reason(merged.hr_active, profile)
+                            and not matching_deal_breaker(merged.jd, profile.get("jd_deal_breakers", []))
+                        )
+                        if needs_company:
+                            try:
+                                company_text = company_reader.read(merged.company_url)
+                            except PlatformSafetyStop as exc:
+                                return limited(exc.reason)
+                            except CompanyScheduleStopped as exc:
+                                if exc.reason == "user_stopped":
+                                    return PlatformCollectionResult(self.platform, "stopped", "user_stopped", "用户已停止")
+                                return risk(exc.reason, exc.evidence)
+                            merged = replace(merged, company_work_schedule=company_text)
                         if not hooks.on_candidate(merged):
                             return PlatformCollectionResult(self.platform, "completed", "callback_stopped", "采集回调已停止")
                     if not hooks.can_checkpoint():
@@ -707,6 +750,7 @@ class BossCollector:
                 if not combo_complete:
                     incomplete_combos += 1
         finally:
+            company_reader.close()
             if detail_worker:
                 self.browser.close_tab(detail_worker)
             if worker_target:
@@ -796,6 +840,7 @@ class BossCollector:
             hr_active=str(detail.get("hr_active") or "").strip(),
             company_size=str(detail.get("company_size") or "").strip(),
             company_industry=str(detail.get("company_industry") or "").strip(),
+            company_url=normalize_company_url(detail.get("company_url")),
             url=detail_url,
             source_keyword=candidate.source_keyword,
         )

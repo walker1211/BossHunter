@@ -53,6 +53,8 @@ class JobCandidateAsJobRecordTests(unittest.TestCase):
             url="https://example.com/job/789",
             source_keyword="Python",
             work_location="上海·徐汇区",
+            company_url="https://example.com/company/1",
+            company_work_schedule="周休两天",
         )
         record = candidate.as_job_record()
 
@@ -62,6 +64,8 @@ class JobCandidateAsJobRecordTests(unittest.TestCase):
         self.assertEqual(record["source_job_id"], "789")
         self.assertEqual(record["source_keyword"], "Python")
         self.assertEqual(record["work_location"], "上海·徐汇区")
+        self.assertEqual(record["company_url"], "https://example.com/company/1")
+        self.assertEqual(record["company_work_schedule"], "周休两天")
         self.assertIn("recruitment_type", record)
 
     def test_recruitment_type_classified_when_unknown(self):

@@ -21,7 +21,8 @@ from bosshunter.collection.platforms.boss import (
     generate_boss_job_id,
     normalize_boss_search_filters,
 )
-from bosshunter.db import get_db, get_collected_combos, get_page_progress, mark_combo_collected, upsert_page_progress
+from bosshunter.collection.platforms.boss_company import JS_EXTRACT_COMPANY_SCHEDULE
+from bosshunter.db import get_db, get_collected_combos, get_page_progress, insert_job, mark_combo_collected, upsert_page_progress
 from bosshunter.collection_run_store import (
     boss_combo_key, get_collection_run, mark_orphaned_collection_runs_stopped,
 )
@@ -797,3 +798,134 @@ class BossEdgeCaseTests(TestCase):
         )
         self.assertEqual(result.status, "stopped")
         self.assertEqual(result.reason_code, "user_stopped")
+
+
+class BossCompanyScheduleIntegrationTests(TestCase):
+    COMPANY_URL = "https://www.zhipin.com/gongsi/acme.html"
+
+    def _collect(self, jds, *, company_risk=False, save_conn=None, config=None, hr_active=""):
+        tabs = {}
+        opened = []
+        closed = []
+        company_reads = []
+        collected = []
+        jobs = [
+            {"title": "Go 后端", "company": "示例公司", "salary": "20-30K",
+             "url": f"/job_detail/job{index}.html"}
+            for index in range(len(jds))
+        ]
+
+        def new_tab(url, **_kwargs):
+            tab = f"tab-{len(opened) + 1}"
+            opened.append((tab, url))
+            tabs[tab] = url
+            return tab
+
+        def navigate(tab, url):
+            tabs[tab] = url
+            return True
+
+        def evaluate(tab, script):
+            url = tabs.get(tab, "")
+            is_company = "/gongsi/" in url
+            if script == JS_DETECT_COLLECTION_RISK:
+                return json.dumps({"risk": "captcha" if is_company and company_risk else None})
+            if script == JS_EXTRACT_LIST:
+                return json.dumps(jobs)
+            if script == JS_EXTRACT_DETAIL:
+                index = int(url.rsplit("job", 1)[1].split(".")[0])
+                return json.dumps({"title": "Go 后端", "company": "示例公司", "city": "北京",
+                                   "jd": jds[index], "company_url": self.COMPANY_URL, "hr_active": hr_active})
+            if script == JS_EXTRACT_COMPANY_SCHEDULE:
+                company_reads.append(url)
+                return json.dumps({"company_url": url, "company_work_schedule": "周末双休"})
+            return "{}"
+
+        browser = BossBrowser(
+            new_tab=new_tab,
+            close_tab=lambda tab: closed.append(tab) or True,
+            evaluate=evaluate,
+            navigate=navigate,
+            scroll=lambda *_args, **_kwargs: True,
+            wait_for_load=lambda *_args, **_kwargs: True,
+        )
+        throttle = MagicMock()
+        throttle.wait.return_value = False
+
+        def on_candidate(candidate):
+            collected.append(candidate)
+            if save_conn is not None:
+                insert_job(save_conn, candidate.as_job_record())
+            return True
+
+        hooks = CollectorHooks(
+            stop_event=None,
+            on_list_candidate=lambda _candidate: True,
+            on_candidate=on_candidate,
+            on_parse_failed=lambda _reason: None,
+            on_event=lambda **_kwargs: None,
+        )
+        result = BossCollector(
+            browser=browser, sleep=lambda _seconds: None,
+            throttle_factory=lambda **_kwargs: throttle,
+            config=config,
+        ).collect(
+            PlatformCollectionRequest("boss", ["Go"], ["北京"], {"北京": "101010100"}, max_pages=1),
+            hooks,
+        )
+        return result, collected, opened, closed, company_reads
+
+    def test_posting_claim_or_negated_double_skips_company_visit(self):
+        for jd in ("单休", "大小周", "双休或单休", "不保证双休"):
+            with self.subTest(jd=jd):
+                result, collected, opened, closed, reads = self._collect([jd])
+                self.assertEqual(result.status, "completed")
+                self.assertEqual(len(collected), 1)
+                self.assertEqual(collected[0].company_work_schedule, "")
+                self.assertFalse(any("/gongsi/" in url for _, url in opened))
+                self.assertEqual(reads, [])
+                self.assertEqual({tab for tab, _ in opened}, set(closed))
+
+    def test_unknown_jobs_share_one_company_read_and_save_claim(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            conn = get_db(Path(tmp) / "jobs.db")
+            try:
+                result, collected, opened, closed, reads = self._collect(
+                    ["负责 API 开发", "维护后端服务"], save_conn=conn,
+                )
+                self.assertEqual(result.status, "completed")
+                self.assertEqual(len(collected), 2)
+                self.assertEqual(len(reads), 1)
+                self.assertEqual(sum("/gongsi/" in url for _, url in opened), 1)
+                self.assertEqual({tab for tab, _ in opened}, set(closed))
+                rows = conn.execute(
+                    "SELECT company_url, company_work_schedule, work_schedule, work_schedule_source "
+                    "FROM jobs ORDER BY id"
+                ).fetchall()
+                self.assertEqual([tuple(row) for row in rows], [
+                    (self.COMPANY_URL, "周末双休", "double", "company_profile"),
+                    (self.COMPANY_URL, "周末双休", "double", "company_profile"),
+                ])
+            finally:
+                conn.close()
+
+    def test_company_captcha_blocks_and_closes_every_tab(self):
+        result, collected, opened, closed, reads = self._collect(
+            ["负责 API 开发"], company_risk=True,
+        )
+        self.assertEqual((result.status, result.reason_code), ("blocked", "captcha"))
+        self.assertEqual(collected, [])
+        self.assertEqual(reads, [])
+        self.assertEqual({tab for tab, _ in opened}, set(closed))
+
+    def test_rejected_hr_or_jd_does_not_spend_company_page_budget(self):
+        cases = (
+            ("API开发", {"profile": {"hr_active_within_days": 1, "hr_active_keep_unknown": False}}, "近7天活跃"),
+            ("需要长期驻场", {"profile": {"jd_deal_breakers": ["长期驻场"]}}, "今日活跃"),
+        )
+        for jd, config, hr_active in cases:
+            with self.subTest(jd=jd):
+                result, _, opened, _, reads = self._collect([jd], config=config, hr_active=hr_active)
+                self.assertEqual(result.status, "completed")
+                self.assertEqual(reads, [])
+                self.assertFalse(any("/gongsi/" in url for _, url in opened))

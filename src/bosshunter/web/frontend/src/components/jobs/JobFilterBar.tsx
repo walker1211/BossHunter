@@ -107,9 +107,9 @@ export function JobFilterBar({
         ]} />
         <Select className={cn(controlClass, compact && 'xl:order-1')} value={filters.workSchedule} onChange={event => update('workSchedule', event.target.value)} aria-label="休息安排">
           <option value="">休息安排：全部</option>
-          <option value="double">文案称双休</option>
-          <option value="alternate">文案称大小周</option>
-          <option value="single">文案称单休</option>
+          <option value="double">双休（招聘方声明）</option>
+          <option value="alternate">大小周（招聘方声明）</option>
+          <option value="single">单休（招聘方声明）</option>
           <option value="unclear">表述冲突</option>
           <option value="unknown">未说明</option>
         </Select>

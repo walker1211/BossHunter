@@ -213,6 +213,78 @@ def test_csv_has_bom_formula_protection_and_city_code():
 	assert "101010100" in text
 
 
+def test_export_work_schedule_source_and_company_url():
+	jobs = [
+		{**_job("company"), "work_schedule": "double", "work_schedule_source": "company_profile",
+		 "work_schedule_evidence": "工作时间：双休", "company_url": "https://zhipin.com/gongsi/example.html?source=tracking#details"},
+		{**_job("posting"), "work_schedule": "single", "work_schedule_source": "job_posting"},
+		{**_job("legacy"), "work_schedule": "alternate"},
+		{**_job("unclear"), "work_schedule": "unclear", "work_schedule_source": "company_profile"},
+		{**_job("unknown"), "work_schedule": "unknown"},
+	]
+	content = build_csv(jobs)
+	rows = list(csv.DictReader(io.StringIO(content.decode("utf-8-sig"))))
+	assert "休息安排（职位文案）" not in rows[0]
+	assert [(row["休息安排"], row["休息安排来源"]) for row in rows] == [
+		("公司页称双休", "公司页（福利/简介）"),
+		("文案称单休", "职位文案"),
+		("文案称大小周", "未记录"),
+		("表述冲突", "公司页（福利/简介）"),
+		("未说明", "未记录"),
+	]
+	assert rows[0]["休息安排依据"] == "工作时间：双休"
+	assert rows[0]["公司页链接"] == "https://www.zhipin.com/gongsi/example.html"
+	assert rows[1]["公司页链接"] == ""
+
+
+@pytest.mark.parametrize("unsafe_url", [
+	"javascript:alert(1)", "https://evil.example/gongsi/123.html",
+	"https://m.zhipin.com/gongsi/123.html", "http://www.zhipin.com/gongsi/123.html",
+	"https://user@www.zhipin.com/gongsi/123.html", "https://www.zhipin.com:8443/gongsi/123.html",
+	"https://www.zhipin.com/gongsi/job", "https://www.zhipin.com/gongsi/123.html/more",
+])
+def test_export_omits_unsafe_company_url(unsafe_url):
+	job = {**_job("unsafe-company"), "company_url": unsafe_url}
+	row = next(csv.DictReader(io.StringIO(build_csv([job]).decode("utf-8-sig"))))
+	assert row["公司页链接"] == ""
+
+
+def test_export_commute_distance_and_safe_route_source():
+	jobs = [
+		{**_job("both"), "work_location": "示例园区", "commute_origin": "示例站",
+		 "commute_minutes": 42, "commute_distance_m": 12345, "commute_mode": "公交",
+		 "commute_source_url": "https://uri.amap.com/navigation?from=A&to=B&mode=bus",
+		 "commute_checked_at": "2026-10-09"},
+		{**_job("small"), "commute_origin": "示例站", "commute_distance_m": 49},
+		{**_job("zero"), "commute_origin": "示例站", "commute_distance_m": 0},
+		{**_job("missing")},
+	]
+	rows = list(csv.DictReader(io.StringIO(build_csv(jobs).decode("utf-8-sig"))))
+	assert rows[0]["办公地点"] == "示例园区"
+	assert rows[0]["通勤起点"] == "示例站"
+	assert rows[0]["单程分钟"] == "42"
+	assert rows[0]["路线公里数"] == "12.3"
+	assert rows[0]["通勤方式"] == "公交"
+	assert rows[0]["地图路线链接"] == "https://uri.amap.com/navigation?from=A&to=B&mode=bus"
+	assert rows[0]["通勤核查日期"] == "2026-10-09"
+	assert rows[1]["路线公里数"] == "<0.1"
+	assert rows[2]["路线公里数"] == "0"
+	assert rows[3]["路线公里数"] == ""
+	assert rows[3]["地图路线链接"] == ""
+
+
+@pytest.mark.parametrize("unsafe_url", [
+	"javascript:alert(1)", "http://www.amap.com/?r=abc", "https://evil.example/?r=abc",
+	"https://user@www.amap.com/?r=abc", "https://www.amap.com:8443/?r=abc",
+	"https://uri.amap.com/navigation?key=secret", "https://ditu.amap.com/dir?token=secret",
+	"https://www.amap.com/route?r=abc", "https://www.amap.com/?r=abc#part",
+])
+def test_export_omits_unsafe_route_source(unsafe_url):
+	job = {**_job("route"), "commute_source_url": unsafe_url}
+	row = next(csv.DictReader(io.StringIO(build_csv([job]).decode("utf-8-sig"))))
+	assert row["地图路线链接"] == ""
+
+
 def test_xlsx_contains_clickable_job_url():
 	job = _job("xlsx-1", city="上海")
 	workbook = load_workbook(io.BytesIO(build_xlsx([job])), read_only=False)

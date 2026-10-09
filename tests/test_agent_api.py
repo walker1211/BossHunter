@@ -40,10 +40,10 @@ class AgentPreferencesTests(unittest.TestCase):
 
     def test_agent_preferences_exposes_commute_limit_read_only(self):
         config = load_config()
-        config["profile"]["commute_origin"] = "宝安客运站"
+        config["profile"]["commute_origin"] = "示例地铁站"
         config["profile"]["commute_max_minutes"] = 60
         preferences = agent_preferences(config)
-        self.assertEqual(preferences["commute"], {"origin": "宝安客运站", "max_minutes": 60})
+        self.assertEqual(preferences["commute"], {"origin": "示例地铁站", "max_minutes": 60})
         with self.assertRaises(AgentRequestError):
             apply_preferences(config, {"commute": {"max_minutes": 120}})
 
