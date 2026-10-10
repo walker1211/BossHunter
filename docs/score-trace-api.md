@@ -33,11 +33,11 @@ Score Trace records the explanation produced by a successful structured AI score
 }
 ```
 
-`review_status` is `initial` for the first assessment and `reviewed` after a successful secondary review. `caps` may contain `technical_required`, `sales_acquisition_core`, `weak_core_transfer`, `key_requirement_unverified`, or `manual_low_priority`.
+`review_status` is `initial` for the first assessment and `reviewed` after a successful secondary review. New `caps` may contain `technical_required`, `sales_acquisition_core`, `weak_core_transfer`, or `manual_low_priority`. Historical traces may also contain `key_requirement_unverified`; this legacy label remains readable but is no longer applied to new scores.
 
 ## Scoring policy
 
-- A hard-requirements component of 0–10 means at least one key mandatory condition lacks evidence or is unmet. The program caps the final score at 70 even when the model omits a cap. Preferred skills must not be treated as mandatory.
+- The hard-requirements component records evidence for mandatory conditions, including gaps when its score is 0–10. It does not trigger an automatic score cap. Preferred skills must not be treated as mandatory.
 - Salary overlap still passes the existing prefilter. When the vacancy's maximum is below the candidate's target maximum and the overlap covers at most 25% of a fully configured target interval, the practical-fit component is capped at 6/10 (5/10 when only the lower endpoint touches). Broader overlap, higher salary, unparsed salary, and one-sided targets do not trigger this deduction.
 - A recorded `manual_company_review` with an explicit `low_priority` recommendation and nonempty review caps the final score at 65. This records application priority; it is not a finding of company misconduct. Company claims and unknowns are supplied to the scorer with their evidence context and are not automatically treated as confirmed risks.
 - Both workbench AI scoring and the local Agent submission endpoint apply these rules before comparing the final score with the configured threshold. The Agent endpoint rejects greetings if the adjusted score fails the threshold.

@@ -38,20 +38,12 @@ def _config(minimum: int = 24, maximum: int = 30) -> dict:
     return {"profile": {"salary_min": minimum, "salary_max": maximum}}
 
 
-def test_missing_key_requirement_caps_high_technical_score_without_model_cap() -> None:
-    result = _result()
-    assert result.raw_score == 83
-    assert result.score == 70
-    assert result.caps == ("key_requirement_unverified",)
-    assert "关键必备条件" in result.reason
-
-
-@pytest.mark.parametrize("hard", [11, 12, 13, 14, 15])
-def test_supported_hard_requirements_do_not_gain_automatic_cap(hard: int) -> None:
+@pytest.mark.parametrize("hard", range(16))
+def test_hard_requirement_score_does_not_gain_automatic_cap(hard: int) -> None:
     result = _result(hard=hard)
     assert result.raw_score == 75 + hard
     assert result.score == result.raw_score
-    assert "key_requirement_unverified" not in result.caps
+    assert result.caps == ()
 
 
 @pytest.mark.parametrize(
@@ -73,7 +65,7 @@ def test_salary_policy_differentiates_narrow_lower_overlap(
     result = scorer.apply_job_score_policy(_result(), _job(salary), _config(minimum, maximum))
     assert result.components["practical_fit"] == practical
     assert result.raw_score == 73 + practical
-    assert result.score == 70
+    assert result.score == result.raw_score
     assert ("实际条件最高" in result.component_evidence["practical_fit"]) is (practical < 10)
 
 
@@ -83,7 +75,7 @@ def test_explicit_low_priority_caps_final_score_and_reapplication_is_stable() ->
     second = scorer.apply_job_score_policy(first, _job(review=review), _config())
     assert first.raw_score == 79
     assert first.score == 65
-    assert first.caps == ("key_requirement_unverified", "manual_low_priority")
+    assert first.caps == ("manual_low_priority",)
     assert second == first
 
 
@@ -97,17 +89,34 @@ def test_explicit_low_priority_caps_final_score_and_reapplication_is_stable() ->
 )
 def test_unreviewed_or_unconfirmed_company_is_not_automatically_downgraded(review: dict | None) -> None:
     result = scorer.apply_job_score_policy(_result(), _job(review=review), _config())
-    assert result.score == 70
+    assert result.score == 79
     assert "manual_low_priority" not in result.caps
 
 
 def test_model_cannot_inject_human_or_derived_caps() -> None:
-    result = _result(hard=12, caps=["manual_low_priority", "key_requirement_unverified"])
+    result = _result(hard=8, caps=["manual_low_priority", "key_requirement_unverified"])
     assert result.caps == ()
     assert result.score == result.raw_score
 
 
-def test_trace_keeps_component_sum_and_both_policy_caps() -> None:
+@pytest.mark.parametrize(
+    "cap,expected_score",
+    [
+        ("technical_required", 55),
+        ("sales_acquisition_core", 65),
+        ("weak_core_transfer", 70),
+    ],
+)
+def test_explicit_model_caps_still_apply_with_low_hard_requirements(
+    cap: str, expected_score: int,
+) -> None:
+    result = _result(hard=8, caps=[cap])
+    assert result.raw_score == 83
+    assert result.score == expected_score
+    assert result.caps == (cap,)
+
+
+def test_trace_keeps_component_sum_and_manual_policy_cap() -> None:
     review = {"type": "manual_company_review", "recommendation": "low_priority", "review": "主体待核"}
     result = scorer.apply_job_score_policy(_result(), _job(review=review), _config())
     trace = scorer.build_score_trace(result)
@@ -115,7 +124,22 @@ def test_trace_keeps_component_sum_and_both_policy_caps() -> None:
     assert sanitized is not None
     assert sum(part["score"] for part in sanitized["components"].values()) == sanitized["raw_score"] == 79
     assert sanitized["final_score"] == 65
-    assert sanitized["caps"] == ["key_requirement_unverified", "manual_low_priority"]
+    assert sanitized["caps"] == ["manual_low_priority"]
+
+
+def test_legacy_trace_keeps_removed_cap_without_recalculating_historical_score() -> None:
+    fresh_trace = scorer.build_score_trace(_result())
+    assert fresh_trace["caps"] == []
+    legacy_trace = {
+        **fresh_trace,
+        "final_score": 70,
+        "caps": ["key_requirement_unverified"],
+    }
+    sanitized = scorer.sanitize_score_trace(legacy_trace)
+    assert sanitized is not None
+    assert sanitized["raw_score"] == 83
+    assert sanitized["final_score"] == 70
+    assert sanitized["caps"] == ["key_requirement_unverified"]
 
 
 def test_agent_evaluations_apply_salary_and_manual_policy_before_greeting() -> None:

@@ -214,7 +214,7 @@ class ScorerTokenResilienceTests(unittest.TestCase):
 
         self.assertIsNotNone(result)
         self.assertEqual(result.components["transferable_evidence"], 19)
-        self.assertEqual(result.score, 70)
+        self.assertEqual(result.score, 74)
         self.assertEqual(result.raw_score, 74)
 
     def test_canonical_field_name_wins_over_alias(self):
@@ -292,7 +292,7 @@ class ScorerTokenResilienceTests(unittest.TestCase):
                 {"ai": {"scoring_concurrency": 1}, "scoring": {"threshold": 71}}
             )
 
-        self.assertEqual((scored, filtered), (0, 1))
+        self.assertEqual((scored, filtered), (1, 0))
 
     def test_request_score_reports_specific_validation_failure(self):
         job = _job("badjson")
@@ -306,7 +306,7 @@ class ScorerTokenResilienceTests(unittest.TestCase):
         self.assertIn("JSON", outcome.failure_detail)
         self.assertIn("无法解析", outcome.failure_detail)
 
-    def test_borderline_review_averages_components_and_keeps_requirement_cap(self):
+    def test_borderline_review_averages_components_without_requirement_cap(self):
         db = MagicMock()
         job = _job("review")
         first = """{
@@ -345,11 +345,11 @@ class ScorerTokenResilienceTests(unittest.TestCase):
                 }
             )
 
-        self.assertEqual((scored, filtered), (0, 1))
+        self.assertEqual((scored, filtered), (1, 0))
         self.assertEqual(call_ai.call_count, 2)
-        self.assertEqual(persist_score.call_args.args[2], 70)
+        self.assertEqual(persist_score.call_args.args[2], 71)
         self.assertEqual(persist_score.call_args.args[4]["raw_score"], 71)
-        self.assertIn("key_requirement_unverified", persist_score.call_args.args[4]["caps"])
+        self.assertEqual(persist_score.call_args.args[4]["caps"], [])
         self.assertIn("二次复核", persist_score.call_args.args[3])
 
     def test_ai_calls_run_with_configured_concurrency_but_db_writes_stay_on_main_thread(self):

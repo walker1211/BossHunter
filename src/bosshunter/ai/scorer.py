@@ -90,7 +90,7 @@ SCORING_PROMPT = """你是一位严谨的招聘匹配评估员。请依据完整
 - technical_required：必须掌握SQL、Linux、编程、服务器/私有化部署等硬技术，最终最高55分。
 - sales_acquisition_core：岗位核心是销售获客、业绩指标或陌生开发，但简历没有对应证据，最终最高65分。
 - weak_core_transfer：只有少量辅助职责可迁移，核心工作缺少直接或相邻证据，最终最高70分。
-程序还会自动执行：硬性要求为0-10分（关键必备条件未获证据支持或不满足）时，key_requirement_unverified最高70分；人工明确低优先级时，manual_low_priority最高65分。必备框架的实际项目经验必须逐项核对，通用语言经验不能自动证明做过该框架项目；仅优先项不得据此降低硬性要求分数。
+程序还会自动执行：人工明确低优先级时，manual_low_priority最高65分。必备框架的实际项目经验必须逐项核对，通用语言经验不能自动证明做过该框架项目；仅优先项不得据此降低硬性要求分数。
 行业“优先”、工具可入职后学习、普通协作事项均不得触发封顶。已有实质相邻证据时不能仅因行业或职位名称不同触发weak_core_transfer。hard_gaps只写JD明确必备且未获证据支持或明确不满足的内容，区分“未体现”和“明确不满足”，不得把待确认意愿写成硬缺口。每个cap必须在理由中指出对应的JD要求及证据缺口。
 
 请严格输出一个JSON对象，不要Markdown，不要额外说明。先写每项evidence再给score，引用具体工作或项目事实；五个score必须是整数且不得超过各自上限：
@@ -131,10 +131,11 @@ CAP_LIMITS = {
     "technical_required": (55, "硬技术缺口封顶55"),
     "sales_acquisition_core": (65, "核心销售获客封顶65"),
     "weak_core_transfer": (70, "核心职责迁移较弱封顶70"),
-    "key_requirement_unverified": (70, "关键必备条件待确认或不满足，封顶70"),
     "manual_low_priority": (65, "人工复核为低优先级，封顶65（非公司违法认定）"),
 }
 MODEL_CAPS = {"technical_required", "sales_acquisition_core", "weak_core_transfer"}
+# Read-only compatibility for traces persisted before this cap was removed.
+LEGACY_TRACE_CAPS = {"key_requirement_unverified"}
 TRACE_SCHEMA_VERSION = 1
 ROLE_SUMMARY_LIMIT = 160
 COMPONENT_EVIDENCE_LIMIT = 240
@@ -402,8 +403,6 @@ def _structured_score_result(result: dict, *, reviewed: bool = False) -> ScoreRe
     if not isinstance(raw_caps, list):
         return None
     caps = tuple(dict.fromkeys(str(cap) for cap in raw_caps if str(cap) in MODEL_CAPS))
-    if components["hard_requirements"] <= 10:
-        caps = (*caps, "key_requirement_unverified")
     summary_reason = _normalize_short_text(result.get("reason"), SUMMARY_REASON_LIMIT)
     if not summary_reason:
         return None
@@ -629,7 +628,10 @@ def sanitize_score_trace(value: object) -> dict | None:
     raw_hard_gaps = value.get("hard_gaps")
     if not isinstance(raw_caps, list) or not isinstance(raw_hard_gaps, list):
         return None
-    caps = [cap for cap in raw_caps if isinstance(cap, str) and cap in CAP_LIMITS]
+    caps = [
+        cap for cap in raw_caps
+        if isinstance(cap, str) and (cap in CAP_LIMITS or cap in LEGACY_TRACE_CAPS)
+    ]
     hard_gaps = _normalize_short_strings(raw_hard_gaps, item_limit=HARD_GAP_LIMIT, maximum=MAX_HARD_GAPS)
     return {
         "schema_version": TRACE_SCHEMA_VERSION,
