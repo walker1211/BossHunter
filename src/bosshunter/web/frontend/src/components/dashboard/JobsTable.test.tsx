@@ -3,7 +3,17 @@ import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { JobsTable } from './JobsTable'
 import type { Job } from '@/hooks/useDashboard'
 
-afterEach(cleanup)
+afterEach(() => {
+  cleanup()
+  vi.restoreAllMocks()
+})
+
+function mockTextOverflow() {
+  vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(144)
+  vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockImplementation(function (this: HTMLElement) {
+    return (this.textContent?.length || 0) > 80 ? 240 : 24
+  })
+}
 
 function showJob(overrides: Partial<Job> = {}) {
   const job = {
@@ -63,5 +73,42 @@ describe('work schedule evidence in the job pool', () => {
     expect(screen.getByText('约 <0.1 公里')).toBeTruthy()
     expect(screen.getByText(/时间待核实/)).toBeTruthy()
     expect(screen.queryByRole('link', { name: '查看原地图路线' })).toBeNull()
+  })
+})
+
+describe('job detail long text', () => {
+  it('expands JD and score reason independently while keeping the full text accessible', () => {
+    mockTextOverflow()
+    const jd = `岗位职责：${'负责后端服务开发、排查和维护。'.repeat(12)}\nJD 末尾`
+    const reason = `评分依据：${'服务端经验与岗位要求需要逐项核对。'.repeat(12)}\n理由末尾`
+    showJob({ jd, score_reason: reason })
+
+    const jdToggle = screen.getByRole('button', { name: '展开JD摘要全文' })
+    const reasonToggle = screen.getByRole('button', { name: '展开评分理由全文' })
+    const jdText = document.getElementById(jdToggle.getAttribute('aria-controls')!)!
+    const reasonText = document.getElementById(reasonToggle.getAttribute('aria-controls')!)!
+    expect(jdToggle.getAttribute('aria-expanded')).toBe('false')
+    expect(jdText.className).toContain('line-clamp-6')
+    expect(jdText.textContent).toBe(jd)
+    expect(reasonText.textContent).toBe(reason)
+
+    fireEvent.click(jdToggle)
+    expect(screen.getByRole('button', { name: '收起JD摘要全文' }).getAttribute('aria-expanded')).toBe('true')
+    expect(jdText.className).not.toContain('line-clamp-6')
+    expect(reasonToggle.getAttribute('aria-expanded')).toBe('false')
+    expect(reasonText.className).toContain('line-clamp-6')
+
+    fireEvent.click(reasonToggle)
+    expect(screen.getByRole('button', { name: '收起评分理由全文' }).getAttribute('aria-expanded')).toBe('true')
+    expect(reasonText.className).not.toContain('line-clamp-6')
+    fireEvent.click(screen.getByRole('button', { name: '收起JD摘要全文' }))
+    expect(jdText.className).toContain('line-clamp-6')
+  })
+
+  it('does not show expansion controls for short or empty text', () => {
+    mockTextOverflow()
+    showJob({ jd: '负责API', greeting: '', score_reason: '简短理由' })
+    expect(screen.queryByRole('button', { name: /JD摘要全文|招呼语全文|评分理由全文/ })).toBeNull()
+    expect(screen.getByText('未生成')).toBeTruthy()
   })
 })

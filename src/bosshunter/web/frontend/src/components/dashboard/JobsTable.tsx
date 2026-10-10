@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useState } from 'react'
+import { Fragment, useEffect, useId, useRef, useState } from 'react'
 import { OutsourcingBadge } from '@/components/jobs/OutsourcingBadge'
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
@@ -68,6 +68,59 @@ function statusVariant(status: string) {
   return variants.has(status) ? status : 'default'
 }
 
+function ExpandableJobText({ label, value, fallback }: { label: string, value?: string | null, fallback: string }) {
+  const [expanded, setExpanded] = useState(false)
+  const [overflowing, setOverflowing] = useState(false)
+  const textRef = useRef<HTMLParagraphElement>(null)
+  const textId = useId()
+  const hasText = Boolean(value?.trim())
+
+  useEffect(() => {
+    setExpanded(false)
+  }, [value])
+
+  useEffect(() => {
+    if (!hasText || expanded) {
+      if (!hasText) setOverflowing(false)
+      return
+    }
+    const element = textRef.current
+    if (!element) return
+    const measure = () => setOverflowing(element.scrollHeight > element.clientHeight + 1)
+    measure()
+
+    if (typeof ResizeObserver !== 'undefined') {
+      const observer = new ResizeObserver(measure)
+      observer.observe(element)
+      return () => observer.disconnect()
+    }
+    window.addEventListener('resize', measure)
+    return () => window.removeEventListener('resize', measure)
+  }, [expanded, hasText, value])
+
+  return (
+    <div className="min-w-0 rounded-2xl border border-card-border bg-card p-4">
+      <p className="mb-2 text-xs font-black text-primary">{label}</p>
+      <p
+        id={textId}
+        ref={textRef}
+        className={`${expanded ? '' : 'line-clamp-6'} whitespace-pre-wrap break-words [overflow-wrap:anywhere] leading-6 text-muted`}
+        title={overflowing && !expanded ? '点击下方“展开全文”查看完整内容' : undefined}
+      >{hasText ? value : fallback}</p>
+      {overflowing && (
+        <button
+          type="button"
+          aria-label={`${expanded ? '收起' : '展开'}${label}全文`}
+          aria-expanded={expanded}
+          aria-controls={textId}
+          onClick={() => setExpanded(!expanded)}
+          className="mt-2 rounded text-xs font-bold text-primary underline underline-offset-2 hover:text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
+        >{expanded ? '收起' : '展开全文'}</button>
+      )}
+    </div>
+  )
+}
+
 export function JobsTable({ jobs, page, pageSize, total, onPageChange, selectedIds, onToggleSelected, onSoftDelete, onMarkManuallySent, onStatusChange, loading = false, sortBy, sortOrder, onSortChange }: JobsTableProps) {
   const [expanded, setExpanded] = useState<string | null>(null)
   const [pageInput, setPageInput] = useState(String(page + 1))
@@ -125,7 +178,7 @@ export function JobsTable({ jobs, page, pageSize, total, onPageChange, selectedI
         <span className="text-xs text-muted">{total} 条记录</span>
       </CardHeader>
       <CardContent className="p-0">
-        <div className="overflow-x-auto">
+        <div className="overflow-x-auto [container-type:inline-size]">
           <table className="w-full text-sm">
             <thead>
               <tr className="whitespace-nowrap border-b border-card-border bg-secondary text-xs text-muted">
@@ -274,34 +327,27 @@ export function JobsTable({ jobs, page, pageSize, total, onPageChange, selectedI
                     {isExpanded && (
                       <tr className="border-b border-card-border bg-surface">
                         <td id={`job-details-${job.id}`} colSpan={hasActions ? 12 : 11} className="px-6 py-4">
-                          <div className="grid grid-cols-1 gap-4 text-sm lg:grid-cols-3">
-                            <div className="rounded-2xl border border-card-border bg-card p-4">
-                              <p className="mb-2 text-xs font-black text-primary">JD摘要</p>
-                              <p className="line-clamp-6 leading-6 text-muted">{job.jd || '无'}</p>
+                          <div className="sticky left-6 w-[calc(100cqw-3rem)] max-w-full min-w-0">
+                            <div className="grid gap-4 text-sm [grid-template-columns:repeat(auto-fit,minmax(min(100%,18rem),1fr))]">
+                              <ExpandableJobText label="JD摘要" value={job.jd} fallback="无" />
+                              <ExpandableJobText label="招呼语" value={job.greeting} fallback="未生成" />
+                              <ExpandableJobText label="评分理由" value={job.score_reason} fallback="无" />
                             </div>
-                            <div className="rounded-2xl border border-card-border bg-card p-4">
-                              <p className="mb-2 text-xs font-black text-primary">招呼语</p>
-                              <p className="line-clamp-6 whitespace-pre-wrap leading-6 text-muted">{job.greeting || '未生成'}</p>
-                            </div>
-                            <div className="rounded-2xl border border-card-border bg-card p-4">
-                              <p className="mb-2 text-xs font-black text-primary">评分理由</p>
-                              <p className="line-clamp-6 whitespace-pre-wrap leading-6 text-muted">{job.score_reason || '无'}</p>
-                            </div>
-                          </div>
-                          <div className="mt-3 grid gap-3 lg:grid-cols-2">
-                            <div className="rounded-2xl border border-card-border bg-card p-4">
-                              <p className="text-xs font-black text-primary">休息安排及依据</p>
-                              <p className="mt-2 leading-6 text-muted">{workScheduleDescription(job.work_schedule, job.work_schedule_source)}</p>
-                              <p className="mt-1 whitespace-pre-wrap leading-6 text-muted">原文依据：{job.work_schedule_evidence || '未记录'}</p>
-                              {companyProfileUrl && (
-                                <a href={companyProfileUrl} target="_blank" rel="noopener noreferrer" className="mt-2 inline-block font-bold text-primary underline">原公司页链接</a>
-                              )}
-                            </div>
-                            <div className="rounded-2xl border border-card-border bg-card p-4">
-                              <p className="text-xs font-black text-primary">办公地点与通勤</p>
-                              <p className="mt-2 leading-6 text-muted">办公地点：{job.work_location || '未采集'}</p>
-                              <p className="mt-1 leading-6 text-muted">{commuteDescription(job)}</p>
-                              {commuteSourceUrl && <a href={commuteSourceUrl} target="_blank" rel="noopener noreferrer" className="mt-2 inline-block rounded text-primary underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary">查看原地图路线</a>}
+                            <div className="mt-3 grid gap-3 [grid-template-columns:repeat(auto-fit,minmax(min(100%,22rem),1fr))]">
+                              <div className="min-w-0 rounded-2xl border border-card-border bg-card p-4">
+                                <p className="text-xs font-black text-primary">休息安排及依据</p>
+                                <p className="mt-2 break-words [overflow-wrap:anywhere] leading-6 text-muted">{workScheduleDescription(job.work_schedule, job.work_schedule_source)}</p>
+                                <p className="mt-1 whitespace-pre-wrap break-words [overflow-wrap:anywhere] leading-6 text-muted">原文依据：{job.work_schedule_evidence || '未记录'}</p>
+                                {companyProfileUrl && (
+                                  <a href={companyProfileUrl} target="_blank" rel="noopener noreferrer" className="mt-2 inline-block font-bold text-primary underline">原公司页链接</a>
+                                )}
+                              </div>
+                              <div className="min-w-0 rounded-2xl border border-card-border bg-card p-4">
+                                <p className="text-xs font-black text-primary">办公地点与通勤</p>
+                                <p className="mt-2 break-words [overflow-wrap:anywhere] leading-6 text-muted">办公地点：{job.work_location || '未采集'}</p>
+                                <p className="mt-1 break-words [overflow-wrap:anywhere] leading-6 text-muted">{commuteDescription(job)}</p>
+                                {commuteSourceUrl && <a href={commuteSourceUrl} target="_blank" rel="noopener noreferrer" className="mt-2 inline-block rounded text-primary underline focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary">查看原地图路线</a>}
+                              </div>
                             </div>
                           </div>
                         </td>
