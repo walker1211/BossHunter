@@ -15,6 +15,7 @@ from urllib.parse import urljoin, urlsplit
 from bosshunter.cities import get_city_code
 from bosshunter.db import normalize_commute_source_url
 from bosshunter.job_filters import matches_hr_activity, parse_monthly_salary_k, validate_hr_activity_filter
+from bosshunter.scoring_review import score_reason_body
 
 
 MAX_EXPORT_JOB_IDS = 1000
@@ -239,7 +240,7 @@ def _failure_reason(job: dict[str, Any]) -> str:
 				return str(payload["message"])[:240]
 		except (TypeError, json.JSONDecodeError):
 			pass
-	reason = str(job.get("score_reason") or "")
+	reason = score_reason_body(job.get("score_reason"))
 	if reason.startswith(("AI评分失败:", "AI 评分失败:", "评分失败:")):
 		return reason.split(":", 1)[1].strip()[:240]
 	return ""

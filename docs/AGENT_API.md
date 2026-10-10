@@ -165,7 +165,8 @@ without preparing outreach:
 ```
 
 `POST /api/agent/evaluations` validates every score dimension, applies the
-existing caps and hard prefilters, records a score trace, and writes passing jobs
+caps, recorded manual company review, salary-overlap limits, and hard prefilters,
+records a score trace, and writes passing jobs
 without a greeting to `scored`; they are not eligible for delivery. Passing jobs
 with a greeting go to `ready`. Agent greetings remain pending confirmation and are excluded
 from shared Web/CLI sender selection until a later human approval. Existing

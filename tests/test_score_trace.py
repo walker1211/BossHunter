@@ -9,6 +9,7 @@ import pytest
 from bosshunter.ai import scorer
 from bosshunter.ai.scorer import ScoreOutcome
 from bosshunter.db import (
+    add_history,
     get_db,
     get_score_trace,
     insert_job,
@@ -324,20 +325,27 @@ def test_prefilter_and_failed_rescore_preserve_existing_valid_trace(tmp_path):
     assert trace["role_summary"] == "保留的有效说明"
 
 
-def test_score_trace_api_exposes_safe_states_and_never_changes_job_list_payload(tmp_path):
+@pytest.mark.parametrize("with_review", [False, True])
+def test_score_trace_api_exposes_safe_states_and_never_changes_job_list_payload(tmp_path, with_review):
     original_base_dir = server.BASE_DIR
     base_dir = Path(tmp_path)
     try:
         db = get_db(base_dir / "data" / "bosshunter.db")
         try:
-            for job_id in ("available", "legacy", "prefilter", "failed", "corrupt"):
+            for job_id in ("available", "legacy", "prefilter", "failed", "corrupt", "unscored"):
                 insert_job(db, _job(job_id))
+                if with_review:
+                    add_history(db, job_id, "manual_intake", json.dumps({
+                        "type": "manual_company_review", "recommendation": "needs_review",
+                        "review": "公司资料待核，仅作说明。",
+                    }, ensure_ascii=False))
             persist_job_score_and_trace(db, "available", 55, "safe", scorer.build_score_trace(_result()))
             update_job_score(db, "legacy", 80, "legacy score")
             update_job_status(db, "legacy", "ready")
             update_job_score(db, "prefilter", 0, "预筛不通过: 硬性条件不符")
             update_job_status(db, "prefilter", "filtered")
             update_job_score(db, "failed", 0, "AI评分失败: invalid JSON")
+            update_job_score(db, "unscored", 0, "")
             db.execute(
                 "INSERT INTO score_traces (job_id, schema_version, trace_json) VALUES (?, ?, ?)",
                 ("corrupt", 1, "not-json"),
@@ -353,6 +361,7 @@ def test_score_trace_api_exposes_safe_states_and_never_changes_job_list_payload(
         failed_status, failed = _request("/api/jobs/failed/score-trace")
         corrupt_status, corrupt = _request("/api/jobs/corrupt/score-trace")
         missing_status, missing = _request("/api/jobs/missing/score-trace")
+        unscored_status, unscored = _request("/api/jobs/unscored/score-trace")
     finally:
         server.set_base_dir(original_base_dir)
 
@@ -375,3 +384,4 @@ def test_score_trace_api_exposes_safe_states_and_never_changes_job_list_payload(
     assert failed_status.startswith("200") and failed["state"] == "failed"
     assert corrupt_status.startswith("200") and corrupt["state"] == "unavailable"
     assert missing_status.startswith("404") and missing == {"error": "job_not_found"}
+    assert unscored_status.startswith("200") and unscored["state"] == "unavailable"

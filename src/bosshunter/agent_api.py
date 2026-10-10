@@ -27,14 +27,16 @@ class AgentRequestError(ValueError):
     """Raised when an agent submits a request outside the safe contract."""
 
 
-def validate_agent_evaluations(value: Any, threshold: int) -> list[dict[str, Any]]:
+def validate_agent_evaluations(
+    value: Any, threshold: int, *, jobs_by_id: dict[str, dict] | None = None, config: dict | None = None,
+) -> list[dict[str, Any]]:
     """Validate Agent-authored scores and optional greetings before a database mutation."""
     if not isinstance(value, list) or not value:
         raise AgentRequestError("evaluations 必须是非空数组")
     if len(value) > _MAX_AGENT_EVALUATIONS:
         raise AgentRequestError(f"每次最多提交 {_MAX_AGENT_EVALUATIONS} 个岗位评估")
 
-    from bosshunter.ai.scorer import build_score_trace, validate_structured_score_payload
+    from bosshunter.ai.scorer import apply_job_score_policy, build_score_trace, validate_structured_score_payload
 
     evaluations: list[dict[str, Any]] = []
     seen_job_ids: set[str] = set()
@@ -51,6 +53,8 @@ def validate_agent_evaluations(value: Any, threshold: int) -> list[dict[str, Any
         score_result = validate_structured_score_payload(item.get("score"))
         if score_result is None:
             raise AgentRequestError("score 必须符合 BossHunter 的完整结构化评分格式")
+        if jobs_by_id is not None and job_id in jobs_by_id:
+            score_result = apply_job_score_policy(score_result, jobs_by_id[job_id], config or {})
 
         passed = score_result.score >= threshold
         greeting_value = item.get("greeting")

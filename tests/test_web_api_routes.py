@@ -498,6 +498,40 @@ class WebApiRouteTests(unittest.TestCase):
         self.assertEqual(trace["final_score"], 87)
         self.assertEqual(entry["action"], "agent_evaluated")
 
+    def test_agent_http_submission_applies_recorded_review_and_salary_limits(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base_dir = Path(tmp)
+            (base_dir / "config.yaml").write_text(yaml.safe_dump({
+                "profile": {"salary_min": 24, "salary_max": 30},
+                "scoring": {"threshold": 71},
+            }), encoding="utf-8")
+            server.set_base_dir(base_dir)
+            db = get_db(base_dir / "data" / "bosshunter.db")
+            insert_job(db, {**_job("reviewed-agent"), "salary": "18-25K"})
+            add_history(db, "reviewed-agent", "manual_intake", json.dumps({
+                "type": "manual_company_review", "recommendation": "low_priority",
+                "review": "人工复核：主体关系待核，暂列低优先级。",
+            }, ensure_ascii=False))
+            db.close()
+            status, _, body = self._request("/api/agent/evaluations/pending")
+            self.assertTrue(status.startswith("200"), body)
+            self.assertEqual(json.loads(body)["items"][0]["manual_company_review"]["recommendation"], "low_priority")
+            status, _, body = self._request("/api/agent/evaluations", "POST", {
+                "evaluations": [{"job_id": "reviewed-agent", "score": _agent_score()}],
+            })
+            self.assertTrue(status.startswith("200"), body)
+            self.assertEqual(json.loads(body)["result"]["filtered"], ["reviewed-agent"])
+            db = get_db(base_dir / "data" / "bosshunter.db")
+            try:
+                row = db.execute("SELECT score, score_reason, status FROM jobs WHERE id='reviewed-agent'").fetchone()
+                self.assertEqual((row["score"], row["status"]), (65, "filtered"))
+                self.assertTrue(row["score_reason"].startswith("人工复核：主体关系待核"))
+                trace = get_score_trace(db, "reviewed-agent")[1]
+                self.assertEqual(trace["components"]["practical_fit"]["score"], 6)
+                self.assertEqual(trace["final_score"], 65)
+            finally:
+                db.close()
+
     def test_agent_score_only_keeps_passing_job_out_of_sender(self):
         with tempfile.TemporaryDirectory() as tmp:
             base_dir = Path(tmp)

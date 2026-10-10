@@ -17,6 +17,7 @@ from bosshunter.outsourcing import (
     rules_version,
 )
 from bosshunter.work_schedule import infer_work_schedule
+from bosshunter.scoring_review import is_manually_filtered, preserve_manual_review_reason, score_reason_body
 
 
 DB_PATH = Path("./data/bosshunter.db")
@@ -666,6 +667,7 @@ def update_job_work_schedule_from_company(
 
 def update_job_score(conn: sqlite3.Connection, job_id: str, score: int, reason: str) -> None:
     """Update job matching score."""
+    reason = preserve_manual_review_reason(conn, job_id, reason)
     conn.execute(
         "UPDATE jobs SET score = ?, score_reason = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND deleted_at IS NULL",
         (score, reason, job_id)
@@ -683,6 +685,7 @@ def persist_job_score_and_trace(
     """Atomically persist a completed structured score and its safe explanation trace."""
     trace_json = json.dumps(trace, ensure_ascii=False, separators=(",", ":"))
     with conn:
+        reason = preserve_manual_review_reason(conn, job_id, reason)
         cursor = conn.execute(
             "UPDATE jobs SET score = ?, score_reason = ?, updated_at = CURRENT_TIMESTAMP "
             "WHERE id = ? AND deleted_at IS NULL",
@@ -739,7 +742,7 @@ def persist_agent_evaluations(conn: sqlite3.Connection, evaluations: list[dict[s
                 "updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'pending' AND deleted_at IS NULL",
                 (
                     int(evaluation["score"]),
-                    str(evaluation["reason"]),
+                    preserve_manual_review_reason(conn, job_id, str(evaluation["reason"])),
                     greeting,
                     status,
                     greeting,
@@ -1494,19 +1497,28 @@ def update_job_quick_score(conn: sqlite3.Connection, job_id: str, quick_score: i
 
 def reset_ai_filtered_jobs(conn: sqlite3.Connection) -> int:
     """Move only AI-scored low-match jobs back to the pending queue."""
-    cursor = conn.execute("""
-        UPDATE jobs
-        SET status = 'pending', score = 0, score_reason = NULL, updated_at = CURRENT_TIMESTAMP
+    rows = conn.execute("""
+        SELECT id, score_reason FROM jobs
         WHERE status = 'filtered'
           AND deleted_at IS NULL
-          AND COALESCE(score_reason, '') != ''
-          AND score_reason NOT LIKE '预筛不通过:%'
-          AND score_reason NOT LIKE 'AI评分失败:%'
-          AND score_reason NOT LIKE 'AI 评分失败:%'
-          AND score_reason NOT LIKE '评分失败:%'
-    """)
-    conn.commit()
-    return cursor.rowcount
+    """).fetchall()
+    reset_count = 0
+    with conn:
+        for row in rows:
+            reason = score_reason_body(row["score_reason"])
+            if not reason or reason.startswith(("预筛不通过:", "AI评分失败:", "AI 评分失败:", "评分失败:")):
+                continue
+            job_id = row["id"]
+            if is_manually_filtered(conn, job_id):
+                continue
+            reason = preserve_manual_review_reason(conn, job_id, "") or None
+            cursor = conn.execute(
+                "UPDATE jobs SET status = 'pending', score = 0, score_reason = ?, "
+                "updated_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'filtered' AND deleted_at IS NULL",
+                (reason, job_id),
+            )
+            reset_count += cursor.rowcount
+    return reset_count
 
 
 def add_risk_event(conn: sqlite3.Connection, event_type: str, detail: str = "") -> None:
@@ -1614,21 +1626,19 @@ def get_funnel_stats(conn: sqlite3.Connection, *, today: bool = False) -> dict[s
         WHERE {scope}
           AND (status != 'filtered' OR (status = 'filtered' AND score > 0))
     """).fetchone()["cnt"]
-    ai_scored = conn.execute(f"""
+    regular_scored = conn.execute(f"""
         SELECT COUNT(*) as cnt FROM jobs
         WHERE {scope}
-          AND (
-            status IN ('scored', 'ready', 'approved', 'rejected', 'sent', 'replied', 'resume_sent', 'needs_resume', 'follow_up_sent')
-            OR (
-                status = 'filtered'
-                AND COALESCE(score_reason, '') != ''
-                AND score_reason NOT LIKE '预筛不通过:%'
-                AND score_reason NOT LIKE 'AI评分失败:%'
-                AND score_reason NOT LIKE 'AI 评分失败:%'
-                AND score_reason NOT LIKE '评分失败:%'
-            )
-          )
+          AND status IN ('scored', 'ready', 'approved', 'rejected', 'sent', 'replied', 'resume_sent', 'needs_resume', 'follow_up_sent')
     """).fetchone()["cnt"]
+    filtered_reasons = conn.execute(f"""
+        SELECT score_reason FROM jobs WHERE {scope} AND status = 'filtered'
+    """).fetchall()
+    ai_scored = regular_scored + sum(
+        bool(reason := score_reason_body(row["score_reason"]))
+        and not reason.startswith(("预筛不通过:", "AI评分失败:", "AI 评分失败:", "评分失败:"))
+        for row in filtered_reasons
+    )
     approved = conn.execute(f"SELECT COUNT(*) as cnt FROM jobs WHERE {scope} AND status IN ('approved', 'sent', 'replied', 'resume_sent', 'needs_resume', 'follow_up_sent')").fetchone()["cnt"]
     sent = conn.execute(f"SELECT COUNT(*) as cnt FROM jobs WHERE {scope} AND status IN ('sent', 'replied', 'resume_sent', 'needs_resume', 'follow_up_sent')").fetchone()["cnt"]
     replied = conn.execute(f"SELECT COUNT(*) as cnt FROM jobs WHERE {scope} AND status IN ('replied', 'resume_sent', 'needs_resume')").fetchone()["cnt"]

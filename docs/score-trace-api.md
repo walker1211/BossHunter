@@ -33,7 +33,18 @@ Score Trace records the explanation produced by a successful structured AI score
 }
 ```
 
-`review_status` is `initial` for the first assessment and `reviewed` after a successful secondary review. `caps` may contain `technical_required`, `sales_acquisition_core`, or `weak_core_transfer`.
+`review_status` is `initial` for the first assessment and `reviewed` after a successful secondary review. `caps` may contain `technical_required`, `sales_acquisition_core`, `weak_core_transfer`, `key_requirement_unverified`, or `manual_low_priority`.
+
+## Scoring policy
+
+- A hard-requirements component of 0–10 means at least one key mandatory condition lacks evidence or is unmet. The program caps the final score at 70 even when the model omits a cap. Preferred skills must not be treated as mandatory.
+- Salary overlap still passes the existing prefilter. When the vacancy's maximum is below the candidate's target maximum and the overlap covers at most 25% of a fully configured target interval, the practical-fit component is capped at 6/10 (5/10 when only the lower endpoint touches). Broader overlap, higher salary, unparsed salary, and one-sided targets do not trigger this deduction.
+- A recorded `manual_company_review` with an explicit `low_priority` recommendation and nonempty review caps the final score at 65. This records application priority; it is not a finding of company misconduct. Company claims and unknowns are supplied to the scorer with their evidence context and are not automatically treated as confirmed risks.
+- Both workbench AI scoring and the local Agent submission endpoint apply these rules before comparing the final score with the configured threshold. The Agent endpoint rejects greetings if the adjusted score fails the threshold.
+- New scoring reasons retain the latest manual company review. Rescoring does not restore a manually filtered job to `ready`, and the AI-filter reset queue skips manual exclusions.
+- Company-review text is a display prefix, not a completed score. Retry selection, funnel counts, missing-trace states, and failure exports classify the scoring text beneath it, so a retained note cannot turn a prefilter or scoring failure into a successful assessment.
+
+Policy changes apply to new evaluations. Historical scores and traces remain unchanged until a separately requested targeted adjustment or rescore.
 
 ## States
 

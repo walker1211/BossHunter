@@ -1,3 +1,4 @@
+import json
 from threading import Event
 from unittest.mock import patch
 
@@ -6,6 +7,7 @@ import pytest
 from bosshunter.ai.scorer import ScoreOutcome, score_jobs
 from bosshunter.db import (
 	JobDeletionConflictError,
+	add_history,
 	get_db,
 	insert_job,
 	soft_delete_jobs,
@@ -78,6 +80,23 @@ def test_selected_jobs_do_not_rescore_existing_results_without_explicit_force(tm
 
 	assert [job["id"] for job in normal] == ["pending"]
 	assert {job["id"] for job in forced} == {"pending", "scored"}
+
+
+def test_wrapped_ai_failure_is_retryable_and_not_counted_as_scored(tmp_path):
+	db = get_db(tmp_path / "wrapped-failure.db")
+	try:
+		insert_job(db, _job("wrapped-failed"))
+		add_history(db, "wrapped-failed", "manual_intake", json.dumps({
+			"type": "manual_company_review", "recommendation": "needs_review", "review": "公司主体待核",
+		}, ensure_ascii=False))
+		update_job_score(db, "wrapped-failed", 0, "AI评分失败: 暂时不可用")
+		assert [job["id"] for job in select_scoring_jobs(db, scope="failed")] == ["wrapped-failed"]
+		assert [job["id"] for job in select_scoring_jobs(db, scope="pending")] == ["wrapped-failed"]
+		update_job_status(db, "wrapped-failed", "filtered")
+		assert [job["id"] for job in select_scoring_jobs(db, scope="all_scored", force_rescore=True)] == []
+		assert [job["id"] for job in select_scoring_jobs(db, scope="selected", job_ids=["wrapped-failed"])] == ["wrapped-failed"]
+	finally:
+		db.close()
 
 
 def test_preview_excludes_hard_filtered_jobs_from_ai_request_count(tmp_path):

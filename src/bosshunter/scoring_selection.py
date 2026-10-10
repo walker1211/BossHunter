@@ -7,6 +7,7 @@ import sqlite3
 from typing import Any, Iterable
 
 from bosshunter.ai.prefilter import quick_score
+from bosshunter.scoring_review import score_reason_body
 
 
 SCORE_SCOPES = {"pending", "failed", "selected", "all_scored"}
@@ -54,7 +55,7 @@ def validate_options(
 
 def _is_ai_scored(job: dict[str, Any]) -> bool:
 	status = str(job.get("status") or "")
-	reason = str(job.get("score_reason") or "").strip()
+	reason = score_reason_body(job.get("score_reason"))
 	if status in {"scored", "ready"}:
 		return True
 	if status == "filtered" and reason and not reason.startswith(PREFILTER_PREFIXES):
@@ -65,7 +66,7 @@ def _is_ai_scored(job: dict[str, Any]) -> bool:
 def _is_retryable_failure(job: dict[str, Any]) -> bool:
 	if job.get("score_failure_json"):
 		return True
-	return str(job.get("score_reason") or "").startswith(("AI评分失败:", "AI 评分失败:", "评分失败:"))
+	return score_reason_body(job.get("score_reason")).startswith(("AI评分失败:", "AI 评分失败:", "评分失败:"))
 
 
 def _query_jobs(conn: sqlite3.Connection, options: dict[str, Any]) -> list[dict[str, Any]]:

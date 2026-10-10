@@ -32,6 +32,7 @@ from bosshunter.agent_api import (
 from bosshunter import __version__
 from bosshunter.ai.credentials import AIRequestError, get_ai_api_key, list_ai_models
 from bosshunter.ai.scorer import sanitize_score_trace
+from bosshunter.scoring_review import get_manual_company_review, score_reason_body
 from bosshunter.cities import CityRefreshError, get_city_map, load_city_snapshot, refresh_city_cache
 from bosshunter.config import AI_SERVICE_PRESETS, load_config, remove_retired_collection_settings, save_config
 from bosshunter.db import (
@@ -1140,7 +1141,7 @@ def _integer_param(name: str, default: int, *, minimum: int, maximum: int | None
 
 def _score_trace_missing_state(job: dict) -> str:
 	"""Classify a missing trace without inferring an AI failure from incomplete evidence."""
-	reason = str(job.get("score_reason") or "").strip()
+	reason = score_reason_body(job.get("score_reason"))
 	if reason.startswith("预筛不通过:"):
 		return "prefilter_only"
 	if reason.startswith(("AI评分失败:", "AI 评分失败:", "评分失败:")):
@@ -2770,8 +2771,10 @@ def _agent_job_evaluation_context(job: dict) -> dict:
 	fields = (
 		"id", "title", "company", "salary", "city", "work_location", "experience", "education",
 		"recruitment_type", "company_size", "company_industry", "hr_name", "hr_title",
+		"work_schedule", "work_schedule_source", "work_schedule_evidence", "company_work_schedule",
 	)
 	context = {field: str(job.get(field) or "") for field in fields}
+	context["manual_company_review"] = job.get("manual_company_review")
 	context["commute"] = {
 		"origin": str(job.get("commute_origin") or ""),
 		"minutes": job.get("commute_minutes"),
@@ -2802,6 +2805,8 @@ def api_agent_pending_evaluations():
 		db = _get_web_db()
 		try:
 			jobs = get_jobs_by_status(db, "pending")[:limit]
+			for job in jobs:
+				job["manual_company_review"] = get_manual_company_review(db, job["id"])
 		finally:
 			db.close()
 		return _json_response({
@@ -2839,10 +2844,20 @@ def api_agent_submit_evaluations():
 				config = load_config(CONFIG_PATH)
 				threshold = int(config.get("scoring", {}).get("threshold", 71))
 				evaluations = validate_agent_evaluations(body["evaluations"], threshold)
+				jobs_by_id = {}
 				for evaluation in evaluations:
 					job = db.execute("SELECT * FROM jobs WHERE id = ?", (evaluation["job_id"],)).fetchone()
+					if job is not None:
+						context = dict(job)
+						context["manual_company_review"] = get_manual_company_review(db, evaluation["job_id"])
+						jobs_by_id[evaluation["job_id"]] = context
+				evaluations = validate_agent_evaluations(
+					body["evaluations"], threshold, jobs_by_id=jobs_by_id, config=config,
+				)
+				for evaluation in evaluations:
+					job = jobs_by_id.get(evaluation["job_id"])
 					if job is not None and evaluation["passed"]:
-						score, reason = quick_score(dict(job), config)
+						score, reason = quick_score(job, config)
 						if score == 0:
 							raise ValueError(f"岗位 {evaluation['job_id']} 预筛不通过：{reason}")
 				result = persist_agent_evaluations(db, evaluations)

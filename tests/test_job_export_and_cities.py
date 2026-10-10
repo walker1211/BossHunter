@@ -213,6 +213,18 @@ def test_csv_has_bom_formula_protection_and_city_code():
 	assert "101010100" in text
 
 
+@pytest.mark.parametrize("prefix", ["AI评分失败:", "AI 评分失败:", "评分失败:"])
+@pytest.mark.parametrize("with_review", [False, True])
+def test_export_retains_failure_reason_beneath_company_review(prefix, with_review):
+	reason = f"{prefix} 模型响应格式无效"
+	if with_review:
+		reason = f"公司资料待核，仅作说明。\n\n【本次评分理由】\n{reason}"
+	content = build_csv([{**_job("failed-with-review"), "score_reason": reason}])
+	row = next(csv.DictReader(io.StringIO(content.decode("utf-8-sig"))))
+	assert row["最近评分失败原因"] == "模型响应格式无效"
+	assert row["评分理由"] == reason
+
+
 def test_export_work_schedule_source_and_company_url():
 	jobs = [
 		{**_job("company"), "work_schedule": "double", "work_schedule_source": "company_profile",
