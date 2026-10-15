@@ -507,10 +507,15 @@ class ZhilianResumeCheckpointTests(TestCase):
             on_event=lambda **kw: events.append(kw),
         )
 
-    def _browser_with_pages(self, pages_jobs):
-        """pages_jobs: dict[int, list[dict]] — page number to list items.
-        None means empty (no items)."""
-        list_calls = {"n": 0}
+    def setUp(self):
+        # These checkpoint tests use an opaque sentinel instead of SQLite.
+        self._access_patch = patch.object(ZhilianCollector, "_reserve_access")
+        self._access_patch.start()
+        self.addCleanup(self._access_patch.stop)
+
+    def _browser_with_pages(self, pages_jobs, *, advance=True, login_after_page=None, blocked_after_page=None):
+        """A stateful append-on-scroll page. None is the explicit end marker."""
+        state = {"page": 1, "submitted": False, "read_state": 0, "end": False}
         detail_payload = json.dumps({
             "source_job_id": "zl-1", "title": "AI", "company": "公司",
             "city": "北京", "jd": "JD 内容", "status": "ready",
@@ -519,14 +524,38 @@ class ZhilianResumeCheckpointTests(TestCase):
         def evaluate(_target, script):
             if "describtion__detail-content" in script:
                 return detail_payload
-            if "expectedCity" not in script:
-                return json.dumps({"items": [], "status": "ready"})
-            list_calls["n"] += 1
-            page_num = list_calls["n"]
-            jobs = pages_jobs.get(page_num)
-            if jobs is None:
-                return json.dumps({"items": [], "status": "empty"})
-            return json.dumps({"items": jobs, "status": "ready"}, ensure_ascii=False)
+            if "window.scrollTo" in script:
+                if not advance:
+                    return json.dumps({"ok": True})
+                next_page = state["page"] + 1
+                if pages_jobs.get(next_page) is None:
+                    state["end"] = True
+                else:
+                    state["page"] = next_page
+                return json.dumps({"ok": True})
+            if "submitted_by" in script:
+                state["submitted"] = True
+                return json.dumps({"ok": True, "value": "AI", "submitted_by": "button"})
+            if "input.focus()" in script:
+                return json.dumps({"ok": True})
+            if "item_count" in script:
+                state["read_state"] += 1
+                # First read belongs to the city landing page, before search.
+                if state["read_state"] == 1:
+                    return json.dumps({"url": "https://www.zhaopin.com/jobs/?jl=530", "input": "", "signature": "landing", "item_count": 0, "identities": []})
+                state["submitted"] = True
+                jobs = [job for page in range(1, state["page"] + 1) for job in (pages_jobs.get(page) or [])]
+                ids = [job["source_job_id"] for job in jobs]
+                return json.dumps({
+                    "url": "https://www.zhaopin.com/jobs/?jl=530&pageMode=search&kw=AI",
+                    "input": "AI", "signature": "|".join(ids), "item_count": len(ids),
+                    "identities": ids, "split_list": True, "end": state["end"],
+                    "login_gate": login_after_page is not None and state["page"] >= login_after_page,
+                    "blocked": blocked_after_page is not None and state["page"] >= blocked_after_page,
+                    "loading": False,
+                })
+            jobs = [job for page in range(1, state["page"] + 1) for job in (pages_jobs.get(page) or [])]
+            return json.dumps({"items": jobs, "status": "ready" if jobs else "empty"}, ensure_ascii=False)
 
         browser = ZhilianBrowser(
             new_tab=lambda _url, **_kw: "tab-1",
@@ -542,7 +571,173 @@ class ZhilianResumeCheckpointTests(TestCase):
 
     def _job(self, job_id="zl-1"):
         return {"source_job_id": job_id, "title": "AI", "company": "公司",
-                "city": "北京", "url": f"/job/{job_id}.html"}
+                "city": "北京", "salary": "15-25K", "url": f"/job/{job_id}.html"}
+
+    def _run_pages(self, browser, *, max_pages=3, saved_page=0, on_list=None, can_checkpoint=None, sort="default"):
+        seen = []
+        checkpoints = []
+        hooks = CollectorHooks(
+            stop_event=None,
+            on_list_candidate=on_list or (lambda candidate: seen.append(candidate.source_job_id) or False),
+            on_candidate=lambda candidate: seen.append(candidate.source_job_id) or True,
+            on_parse_failed=lambda _reason: None,
+            on_event=lambda **_kw: None,
+            can_checkpoint=can_checkpoint or (lambda: True),
+        )
+        collector = ZhilianCollector(browser=browser, safety_conn=object(), sleep=lambda _s: None)
+        with (
+            patch("bosshunter.collection.platforms.zhilian.SendWindowChecker.is_active", return_value=True),
+            patch("bosshunter.collection.platforms.zhilian.should_take_day_off", return_value=False),
+            patch("bosshunter.collection.platforms.zhilian.prune_collected_combos"),
+            patch("bosshunter.collection.platforms.zhilian.prune_page_progress"),
+            patch("bosshunter.collection.platforms.zhilian.get_collected_combos", return_value=set()),
+            patch("bosshunter.collection.platforms.zhilian.get_page_progress", return_value=saved_page) as get_progress,
+            patch("bosshunter.collection.platforms.zhilian.upsert_page_progress",
+                  side_effect=lambda _c, _s, _ci, _k, page: checkpoints.append(page)),
+            patch("bosshunter.collection.platforms.zhilian.mark_combo_collected") as mark,
+            patch("bosshunter.collection.platforms.zhilian.delete_page_progress") as delete,
+        ):
+            result = collector.collect(
+                PlatformCollectionRequest("zhilian", ["AI"], ["北京"], {"北京": "530"}, max_pages=max_pages, sort=sort),
+                hooks,
+            )
+        return result, seen, checkpoints, mark.call_count, delete.call_count, get_progress.call_count
+
+    def test_append_processes_each_batch_once(self):
+        browser = self._browser_with_pages({
+            1: [self._job("zl-1")], 2: [self._job("zl-2")], 3: [self._job("zl-3")],
+        })
+        result, seen, checkpoints, mark, delete, _ = self._run_pages(browser)
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(seen, ["zl-1", "zl-2", "zl-3"])
+        self.assertEqual(checkpoints, [1, 2, 3])
+        self.assertEqual((mark, delete), (0, 0))
+
+    def test_no_append_stops_without_clearing_checkpoint(self):
+        browser = self._browser_with_pages({
+            1: [self._job("zl-1")], 2: [self._job("zl-2")],
+        }, advance=False)
+        result, seen, checkpoints, mark, delete, _ = self._run_pages(browser)
+        self.assertEqual((result.status, result.reason_code), ("blocked", "page_not_advanced"))
+        self.assertEqual(seen, ["zl-1"])
+        self.assertEqual(checkpoints, [1])
+        self.assertEqual((mark, delete), (0, 0))
+
+    def test_filtered_batch_still_loads_next_batch(self):
+        browser = self._browser_with_pages({
+            1: [self._job("zl-1")], 2: [self._job("zl-2")], 3: None,
+        })
+        seen = []
+        result, _, checkpoints, mark, delete, _ = self._run_pages(
+            browser, on_list=lambda candidate: seen.append(candidate.source_job_id) or False,
+        )
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(seen, ["zl-1", "zl-2"])
+        self.assertEqual(checkpoints, [1, 2])
+        self.assertEqual((mark, delete), (1, 1))
+
+    def test_resume_replays_previous_batch_without_processing_it(self):
+        browser = self._browser_with_pages({
+            1: [self._job("zl-1")], 2: [self._job("zl-2")], 3: None,
+        })
+        result, seen, checkpoints, mark, delete, _ = self._run_pages(browser, saved_page=1)
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(seen, ["zl-2"])
+        self.assertEqual(checkpoints, [2])
+        self.assertEqual((mark, delete), (1, 1))
+
+    def test_save_failure_keeps_prior_checkpoint(self):
+        browser = self._browser_with_pages({1: [self._job("zl-1")]})
+        result, _, checkpoints, mark, delete, _ = self._run_pages(browser, can_checkpoint=lambda: False)
+        self.assertEqual((result.status, result.reason_code), ("failed", "save_failed"))
+        self.assertEqual(checkpoints, [])
+        self.assertEqual((mark, delete), (0, 0))
+
+    def test_login_gate_after_append_preserves_prior_checkpoint(self):
+        browser = self._browser_with_pages({
+            1: [self._job("zl-1")], 2: [self._job("zl-2")],
+        }, login_after_page=2)
+        result, _, checkpoints, mark, delete, _ = self._run_pages(browser)
+        self.assertEqual((result.status, result.reason_code), ("blocked", "login_required"))
+        self.assertEqual(checkpoints, [1])
+        self.assertEqual((mark, delete), (0, 0))
+
+    def test_verification_after_append_preserves_prior_checkpoint(self):
+        browser = self._browser_with_pages({
+            1: [self._job("zl-1")], 2: [self._job("zl-2")],
+        }, blocked_after_page=2)
+        result, _, checkpoints, mark, delete, _ = self._run_pages(browser)
+        self.assertEqual((result.status, result.reason_code), ("blocked", "blocked"))
+        self.assertEqual(checkpoints, [1])
+        self.assertEqual((mark, delete), (0, 0))
+
+    def test_nondefault_sort_does_not_touch_default_checkpoint(self):
+        browser = self._browser_with_pages({1: [self._job("zl-1")]})
+        original = browser.evaluate
+        def sorted_evaluate(target, script):
+            if ".jobs-list-sort-placeholder__item" in script and "newest.click()" in script:
+                return json.dumps({"ok": True})
+            value = original(target, script)
+            if "item_count" in script:
+                state = json.loads(value)
+                if state.get("item_count"):
+                    state["sort"] = "最新"
+                    state["signature"] = "newest|" + state["signature"]
+                return json.dumps(state)
+            return value
+        browser.evaluate = sorted_evaluate
+        result, seen, checkpoints, mark, delete, reads = self._run_pages(browser, max_pages=1, sort="newest")
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(seen, ["zl-1"])
+        self.assertEqual((checkpoints, mark, delete, reads), ([], 0, 0, 0))
+
+    def test_newest_click_waits_for_refreshed_list(self):
+        states = iter([
+            {"signature": "old", "sort": "默认"},
+            {"signature": "old", "sort": "最新", "loading": True},
+            {"signature": "new", "sort": "最新", "loading": False},
+        ])
+        actions = []
+        def evaluate(_target, script):
+            if "item_count" in script:
+                return json.dumps(next(states))
+            actions.append(script)
+            return json.dumps({"ok": True})
+        collector = ZhilianCollector(
+            browser=ZhilianBrowser(evaluate=evaluate), safety_conn=object(), sleep=lambda _s: None,
+        )
+        collector._select_sort("tab-1", "newest")
+        self.assertEqual(len(actions), 1)
+        self.assertIn("newest.click()", actions[0])
+
+    def test_stale_detail_panel_is_not_accepted(self):
+        old = {"status": "ready", "source_job_id": "zl-old", "title": "旧岗", "company": "公司",
+               "city": "北京", "url": "/job/zl-old.html", "jd": "旧 JD"}
+        target = {**old, "source_job_id": "zl-target", "title": "目标岗", "url": "/job/zl-target.html"}
+        responses = iter([old, old, target])
+        collector = ZhilianCollector(
+            browser=ZhilianBrowser(evaluate=lambda _t, _s: json.dumps(next(responses))),
+            sleep=lambda _s: None,
+        )
+        self.assertEqual(collector._read_matching_detail("tab-1", "北京", "zl-target")["title"], "目标岗")
+        always_old = ZhilianCollector(
+            browser=ZhilianBrowser(evaluate=lambda _t, _s: json.dumps(old)),
+            sleep=lambda _s: None,
+        )
+        with self.assertRaisesRegex(CollectionError, "未切换"):
+            always_old._read_matching_detail("tab-1", "北京", "zl-target")
+
+    def test_access_reservation_uses_platform_action_limits(self):
+        self._access_patch.stop()
+        config = {"collection": {"daily_search_page_limit": 200, "daily_detail_page_limit": 180}}
+        collector = ZhilianCollector(config=config, safety_conn=object())
+        with patch("bosshunter.collection.platforms.zhilian.PlatformAccessGuard") as guard:
+            collector._reserve_access("search_page")
+            collector._reserve_access("detail_page")
+        self.assertEqual(guard.call_args_list[0].args[2:], ("collection", "zhilian"))
+        self.assertEqual(guard.return_value.reserve.call_args_list[0].args, ("search_page",))
+        self.assertEqual(guard.return_value.reserve.call_args_list[0].kwargs, {"daily_limit": 200})
+        self.assertEqual(guard.return_value.reserve.call_args_list[1].kwargs, {"daily_limit": 180})
 
     def test_completed_combo_skipped_entirely(self):
         browser = self._browser_with_pages({1: [self._job()]})
@@ -683,8 +878,8 @@ class ZhilianResumeCheckpointTests(TestCase):
             )
         self.assertEqual(result.status, "completed")
         self.assertEqual(len(collected), 0)
-        mark_complete.assert_called_once()
-        delete_progress.assert_called_once()
+        mark_complete.assert_not_called()
+        delete_progress.assert_not_called()
         skip_events = [e for e in events if e.get("phase") == "completed_keyword"]
         self.assertTrue(any("页级断点" in str(e.get("message", "")) for e in skip_events))
 

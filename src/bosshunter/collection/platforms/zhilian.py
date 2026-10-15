@@ -42,6 +42,7 @@ from bosshunter.db import (
     upsert_page_progress,
 )
 from bosshunter.job_filters import matching_blocked_company, matching_deal_breaker
+from bosshunter.platform_safety import PlatformAccessGuard, PlatformSafetyStop
 from bosshunter.throttle import SendWindowChecker, should_take_day_off
 
 
@@ -182,33 +183,61 @@ JS_CLICK_SEARCH_BUTTON = """
 JS_READ_SEARCH_STATE = """
 (() => {
   const input = document.querySelector('input[placeholder="输入职位、公司等搜索"], input[placeholder*="职位、公司"]');
+  const panel = document.querySelector('.job-list-panel');
+  const view = panel && panel.__vue__;
   const items = Array.from(document.querySelectorAll(
     'div.joblist-box__item, div.joblist-item, article.job-card, div.job-card'
-  )).slice(0, 8);
-  const signature = items.map((item) => {
+  ));
+  const identities = items.map((item) => {
     const link = item.querySelector('a[href*="/jobdetail/"], a[href*="/job/"], a[href*="/position/"], a[href*="/detail/"]');
-    return (link?.getAttribute('href') || item.textContent || '').trim().slice(0, 240);
-  }).join('|');
+    const job = item.__vue__?.$props?.job;
+    return String(item.getAttribute('data-positionid') || item.getAttribute('data-job-id')
+      || job?.number || job?.positionUrl || link?.getAttribute('href') || item.textContent || '').trim().slice(0, 240);
+  });
+  const status = panel?.querySelector('.job-list-panel__status--more')?.textContent?.trim() || '';
+  const bodyText = document.body?.innerText || '';
+  const activeSort = Array.from(document.querySelectorAll('.jobs-list-sort-placeholder__item'))
+    .find(node => node.classList.contains('jobs-list-sort-placeholder__item--active'))?.textContent?.trim() || '';
   return JSON.stringify({
     url: window.location.href,
     input: input ? input.value || '' : '',
-    signature,
+    signature: identities.join('|'),
+    identities,
     item_count: items.length,
+    split_list: Boolean(panel),
+    loading: Boolean(view?.loading || view?.loadingMore),
+    has_more: typeof view?.hasMore === 'boolean' ? view.hasMore : null,
+    login_gate: Boolean(view?.showLoginGate || panel?.querySelector('[class*="login-gate"]')),
+    can_load_more: typeof view?.canLoadMoreJobList === 'boolean' ? view.canLoadMoreJobList : null,
+    end: /没有更多了/.test(status),
+    blocked: /验证码|滑块|访问频繁|频率限制|账号异常|拒绝访问/.test(bodyText),
+    sort: activeSort,
   });
 })()
 """
 
-JS_NAVIGATE_PAGE = """
+JS_LOAD_MORE = """
 (() => {
-  const url = new URL(window.location.href);
-  const page = String(__PAGE__);
-  if (/\\/p\\d+\\/?$/.test(url.pathname)) {
-    url.pathname = url.pathname.replace(/\\/p\\d+\\/?$/, `/p${page}`);
-  } else {
-    url.pathname = `${url.pathname.replace(/\\/?$/, '')}/p${page}`;
-  }
-  window.location.href = url.toString();
-  return JSON.stringify({ok: true, url: url.toString()});
+  const height = Math.max(document.body?.scrollHeight || 0, document.documentElement?.scrollHeight || 0);
+  const bottom = Math.max(0, height - window.innerHeight);
+  window.scrollTo(0, Math.max(0, bottom - 1100));
+  window.dispatchEvent(new Event('scroll'));
+  window.scrollTo(0, bottom);
+  window.dispatchEvent(new Event('scroll'));
+  return JSON.stringify({ok: true});
+})()
+"""
+
+# Import compatibility for local adapters; the script never guesses a /pN URL.
+JS_NAVIGATE_PAGE = JS_LOAD_MORE
+
+JS_SELECT_NEWEST = """
+(() => {
+  const options = Array.from(document.querySelectorAll('.jobs-list-sort-placeholder__item'));
+  const newest = options.find(node => node.textContent.trim() === '最新');
+  if (!newest) return JSON.stringify({ok: false, reason: 'sort_missing'});
+  if (!newest.classList.contains('jobs-list-sort-placeholder__item--active')) newest.click();
+  return JSON.stringify({ok: true});
 })()
 """
 
@@ -222,7 +251,7 @@ JS_EXTRACT_LIST = """
     'div.joblist-box__item, div.joblist-item, article.job-card, div.job-card'
   )).map((item, cardIndex) => {
     const first = (selectors) => selectors.map((s) => item.querySelector(s)).find(Boolean);
-    const title = first(['a.jobinfo__name', '.job-card__title-text', '.job-name', '.job-title']);
+    const title = first(['a.jobinfo__name', '.job-card__title-text', '.job-card__title-clamp', '.job-card__name', '.job-name', '.job-title']);
     const salary = first(['p.jobinfo__salary', '.job-card__salary', '.job-salary', '.salary']);
     const company = first(['.companyinfo__name', '.job-card__company-name', '.company-name', '.company']);
     const info = Array.from(item.querySelectorAll('.jobinfo__other-info-item')).map((node) => node.textContent.trim()).filter(Boolean);
@@ -238,16 +267,17 @@ JS_EXTRACT_LIST = """
       const detailPath = new URL(href, window.location.href).pathname;
       matchedId = detailPath.match(/\\/(?:jobdetail|job|position|detail)\\/([^/?]+?)(?:\\.html?)?$/i);
     } catch (_) {}
+    const job = item.__vue__?.$props?.job;
     return {
       card_index: item.matches('div.job-card') ? cardIndex : null,
       source_job_id: item.getAttribute('data-positionid') || item.getAttribute('data-job-id') || item.getAttribute('data-id')
         || (title ? title.getAttribute('data-positionid') : '') || (detailLink ? detailLink.getAttribute('data-positionid') : '')
-        || (matchedId ? matchedId[1] : ''),
-      title: title ? title.textContent.trim() : '',
+        || (matchedId ? matchedId[1] : '') || (job ? String(job.number || '') : ''),
+      title: (title ? title.textContent.trim() : '') || (job ? String(job.name || '') : ''),
       salary: salary ? salary.textContent.trim() : '',
       company: company ? company.textContent.trim() : '',
       city,
-      url: href
+      url: href || (job ? String(job.positionUrl || '') : '')
     };
   });
   const hasListRegion = Boolean(document.querySelector('.positionlist__list, [class*="positionlist"], .job-list-panel'));
@@ -280,6 +310,7 @@ JS_EXTRACT_DETAIL = """
   const company = first(['.job-card--active .job-card__company-name', '.job-detail-summary__company-name', '.company-info__name', 'div.companyinfo__name', '.company-name', '.company']);
   const cityNode = first(['.job-detail-summary__tag', '.address-info__content', '.summary-planes__info', '.jobinfo__city', '.job-city', '.city']);
   const detailLink = first(['a.job-company-info__view-all', 'a[href*="/jobdetail/"]']);
+  const activeJob = document.querySelector('.job-card--active')?.__vue__?.$props?.job;
   const jdText = jd ? jd.textContent.trim() : '';
   const loginPage = /(?:^|\\/)(?:passport|login)(?:\\/|$)/i.test(window.location.pathname);
   const loginDialog = Array.from(document.querySelectorAll(
@@ -297,7 +328,9 @@ JS_EXTRACT_DETAIL = """
     status: blockedMatch ? 'blocked' : jdText ? 'ready' : loginRequired ? 'login_required' : 'selector_changed',
     title: title ? title.textContent.trim() : '', salary: salary ? salary.textContent.trim() : '',
     company: company ? company.textContent.trim() : '', city,
-    jd: jdText, url: detailLink ? detailLink.href : window.location.href
+    jd: jdText,
+    source_job_id: activeJob ? String(activeJob.number || '') : '',
+    url: (activeJob ? String(activeJob.positionUrl || '') : '') || (detailLink ? detailLink.href : window.location.href)
   });
 })()
 """
@@ -343,7 +376,8 @@ def _build_submit_search_script(keyword: str) -> str:
 
 
 def _build_page_script(page: int) -> str:
-    return JS_NAVIGATE_PAGE.replace("__PAGE__", str(int(page)))
+    # Kept as a compatibility seam; /jobs/ uses append-on-scroll.
+    return JS_LOAD_MORE
 
 
 def _build_list_script(city: str) -> str:
@@ -815,6 +849,18 @@ class ZhilianCollector:
                 navigate_action=browser_navigate,
             )
 
+    def _reserve_access(self, action: str) -> None:
+        if self.safety_conn is None:
+            return
+        collection = self.config.get("collection")
+        collection = collection if isinstance(collection, dict) else {}
+        key = "daily_search_page_limit" if action == "search_page" else "daily_detail_page_limit"
+        try:
+            limit = max(1, int(collection.get(key, 60 if action == "search_page" else 900)))
+        except (TypeError, ValueError):
+            limit = 60 if action == "search_page" else 900
+        PlatformAccessGuard(self.safety_conn, self.config, "collection", "zhilian").reserve(action, daily_limit=limit)
+
     def _passes_filters(self, candidate: JobCandidate) -> bool:
         return not self._filter_reason(candidate)
 
@@ -924,6 +970,62 @@ class ZhilianCollector:
             return {}
         return payload
 
+    def _select_sort(self, target_id: str, sort: str) -> None:
+        if sort == "default":
+            return
+        if sort != "newest":
+            raise CollectionError("unsupported_sort", "智联不支持当前排序条件")
+        before = self._search_state(target_id)
+        if before.get("sort") == "最新":
+            return
+        self._reserve_access("search_page")
+        clicked = self._parse_payload(self.browser.evaluate(target_id, JS_SELECT_NEWEST))
+        if clicked.get("ok") is not True:
+            raise CollectionError("sort_not_applied", "智联最新排序选项未找到")
+        for _ in range(20):
+            state = self._search_state(target_id)
+            if state.get("blocked"):
+                raise CollectionBlockedError("blocked", "智联最新排序触发验证，已停止")
+            if state.get("login_gate"):
+                raise CollectionBlockedError("login_required", "智联最新排序要求登录，已停止")
+            if state.get("sort") == "最新" and not state.get("loading") and (
+                not before.get("signature") or state.get("signature") != before.get("signature")
+            ):
+                return
+            self.sleep(0.5)
+        raise CollectionError("sort_not_applied", "智联最新排序未刷新列表")
+
+    def _load_more(self, target_id: str, previous: dict[str, Any]) -> dict[str, Any]:
+        """Only accept an append with the previous ordered identities intact."""
+        old_ids = previous.get("identities")
+        old_count = previous.get("item_count")
+        if not isinstance(old_ids, list) or not isinstance(old_count, int) or len(old_ids) != old_count:
+            raise CollectionError("page_not_advanced", "无法确认智联上一批岗位身份，已保留断点")
+        if previous.get("login_gate"):
+            raise CollectionBlockedError("login_required", "智联列表要求登录，已停止")
+        if previous.get("blocked"):
+            raise CollectionBlockedError("blocked", "智联页面出现验证，已停止")
+        if previous.get("end"):
+            return previous
+        self._reserve_access("search_page")
+        if self._parse_payload(self.browser.evaluate(target_id, JS_LOAD_MORE)).get("ok") is not True:
+            raise CollectionError("page_not_advanced", "智联列表未能滚动加载，已保留断点")
+        for _ in range(24):
+            state = self._search_state(target_id)
+            if state.get("blocked"):
+                raise CollectionBlockedError("blocked", "智联页面出现验证，已停止")
+            if state.get("login_gate"):
+                raise CollectionBlockedError("login_required", "智联列表要求登录，已停止")
+            ids = state.get("identities")
+            if isinstance(ids, list) and ids[:old_count] != old_ids:
+                raise CollectionError("page_not_advanced", "智联列表重排，无法确认后续批次，已保留断点")
+            if isinstance(ids, list) and len(ids) > old_count and not state.get("loading"):
+                return state
+            if state.get("end") and not state.get("loading"):
+                return state
+            self.sleep(0.5)
+        raise CollectionError("page_not_advanced", "智联列表未追加新岗位，已保留断点")
+
     def _read_detail_with_retry(
         self,
         target_id: str,
@@ -945,6 +1047,20 @@ class ZhilianCollector:
             if attempt + 1 < attempts:
                 self.sleep(retry_delay)
         return detail
+
+    def _read_matching_detail(self, target_id: str, city: str, source_job_id: str) -> dict[str, Any]:
+        """Wait for the clicked card's JD instead of accepting a stale panel."""
+        detail: dict[str, Any] = {}
+        for attempt in range(3):
+            detail = self._read_detail_with_retry(target_id, city)
+            if detail.get("status") in {"blocked", "login_required"}:
+                return detail
+            candidate = self._candidate_from_list(detail, city, "")
+            if candidate is not None and candidate.source_job_id == source_job_id:
+                return detail
+            if attempt < 2:
+                self.sleep(0.8)
+        raise CollectionError("detail_not_ready", "智联侧栏详情未切换到目标岗位")
 
     def _wait_for_search_results(
         self,
@@ -1283,7 +1399,7 @@ class ZhilianCollector:
 
         # 词级断点续采：跳过最近 N 小时内已完成的 (city, keyword) 组合。
         collected_combos: set[tuple[str, str]] = set()
-        if self.safety_conn is not None:
+        if self.safety_conn is not None and request.sort == "default":
             all_keywords = set(request.keywords)
             prune_collected_combos(self.safety_conn, "zhilian", all_keywords)
             prune_page_progress(self.safety_conn, "zhilian", all_keywords)
@@ -1306,14 +1422,11 @@ class ZhilianCollector:
                                    message=f"智联 {keyword} 断点续采：{self._resume_ttl_hours()}h 内已完成，整词跳过")
                     continue
                 # 页级断点：从上次采到页码的下一页继续
-                saved_page = get_page_progress(self.safety_conn, "zhilian", city, keyword) if self.safety_conn is not None else 0
+                saved_page = get_page_progress(self.safety_conn, "zhilian", city, keyword) if self.safety_conn is not None and request.sort == "default" else 0
                 start_page = saved_page + 1 if saved_page > 0 else 1
                 if start_page > request.max_pages:
-                    if self.safety_conn is not None:
-                        mark_combo_collected(self.safety_conn, "zhilian", city, keyword)
-                        delete_page_progress(self.safety_conn, "zhilian", city, keyword)
                     hooks.on_event(phase="completed_keyword", keyword=keyword, city=city,
-                                   message=f"智联 {keyword} 页级断点已超最大页（{saved_page}/{request.max_pages}），视为已采完，跳过")
+                                   message=f"智联 {keyword} 页级断点已超本轮最大批次（{saved_page}/{request.max_pages}），保留断点")
                     continue
                 target_id: str | None = None
                 try:
@@ -1321,31 +1434,48 @@ class ZhilianCollector:
                         search_url = self.build_search_url(request, city, keyword, 1)
                     except CollectionError as exc:
                         return PlatformCollectionResult(self.platform, "failed", exc.code, exc.message)
+                    try:
+                        self._reserve_access("search_page")
+                    except PlatformSafetyStop as exc:
+                        return PlatformCollectionResult(self.platform, "completed_with_shortage", exc.reason, "智联访问额度或安全锁已阻止本轮继续")
                     initial_url = "about:blank" if self.browser.navigate_action is not None else search_url
                     target_id = self.browser.new_tab(initial_url, background=True)
                     if not target_id:
                         return PlatformCollectionResult(self.platform, "failed", "browser_disconnected", "无法打开智联搜索页")
                     if self.browser.navigate_action is not None and not self.browser.navigate_action(target_id, search_url):
                         return PlatformCollectionResult(self.platform, "failed", "browser_disconnected", "智联搜索页导航失败")
-                    for page in range(start_page, request.max_pages + 1):
+                    state: dict[str, Any] = {}
+                    natural_end = False
+                    processed_count = 0
+                    processed_ids: list[str] = []
+                    for page in range(1, request.max_pages + 1):
                         if hooks.stop_event is not None and hooks.stop_event.is_set():
                             return PlatformCollectionResult(self.platform, "stopped", "user_stopped", "用户已停止")
                         hooks.on_event(phase="loading_list", keyword=keyword, city=city, page=page)
                         try:
                             self.browser.wait_for_load(target_id, timeout=10)
-                            if page == start_page:
+                            if page == 1:
+                                self._reserve_access("search_page")
                                 self._submit_keyword(target_id, keyword)
-                                if start_page > 1:
-                                    self.browser.evaluate(target_id, _build_page_script(page))
+                                self._select_sort(target_id, request.sort)
                             else:
-                                self.browser.evaluate(target_id, _build_page_script(page))
+                                if state.get("item_count", 0) > processed_count:
+                                    identities = state.get("identities")
+                                    if not isinstance(identities, list) or identities[:processed_count] != processed_ids:
+                                        raise CollectionError("page_not_advanced", "智联列表自动追加后身份不连续，已保留断点")
+                                else:
+                                    state = self._load_more(target_id, state)
+                                if state.get("end") and state.get("item_count", 0) == processed_count:
+                                    natural_end = True
+                                    break
                             self.browser.wait_for_load(target_id, timeout=10)
+                        except PlatformSafetyStop as exc:
+                            return PlatformCollectionResult(self.platform, "completed_with_shortage", exc.reason, "智联访问额度或安全锁已阻止本轮继续")
                         except CollectionError as exc:
                             return PlatformCollectionResult(self.platform, "blocked", exc.code, exc.message)
                         except Exception:
                             return PlatformCollectionResult(self.platform, "blocked", "selector_changed", "智联搜索页未能正常加载")
                         try:
-                            self.browser.scroll(target_id, y=2600)
                             raw = self.browser.evaluate(target_id, _build_list_script(city))
                             payload = json.loads(raw) if isinstance(raw, str) else raw
                             if isinstance(payload, list):
@@ -1371,11 +1501,54 @@ class ZhilianCollector:
                             code = exc.code if isinstance(exc, CollectionError) else "selector_changed"
                             message = exc.message if isinstance(exc, CollectionError) else "智联列表解析失败，可能是页面结构变化"
                             return PlatformCollectionResult(self.platform, "blocked", code, message)
-                        if not items:
-                            break
-                        for raw_item in items:
+                        observed = self._search_state(target_id)
+                        if observed.get("blocked"):
+                            return PlatformCollectionResult(self.platform, "blocked", "blocked", "智联页面出现验证，已停止")
+                        if observed.get("login_gate"):
+                            return PlatformCollectionResult(self.platform, "blocked", "login_required", "智联列表要求登录，已停止")
+                        if page == 1 and not items:
+                            if status == "empty" and not observed.get("loading") and (
+                                not observed.get("split_list") or observed.get("end") or observed.get("has_more") is False
+                            ):
+                                natural_end = True
+                                break
+                            return PlatformCollectionResult(self.platform, "blocked", "page_not_advanced", "智联首批列表尚未明确加载完成，已保留断点")
+                        if page > 1 and len(items) <= processed_count:
+                            return PlatformCollectionResult(self.platform, "blocked", "page_not_advanced", "智联列表未出现可验证的新岗位，已保留断点")
+                        if page > 1 and state.get("item_count") != len(items):
+                            return PlatformCollectionResult(self.platform, "blocked", "page_not_advanced", "智联列表身份与岗位数不一致，已保留断点")
+                        if observed.get("split_list") and (
+                            observed.get("item_count") != len(items)
+                            or len(observed.get("identities") or []) != len(items)
+                            or (page > 1 and (observed.get("identities") or [])[:processed_count] != processed_ids)
+                        ):
+                            return PlatformCollectionResult(self.platform, "blocked", "page_not_advanced", "智联列表身份与岗位不一致，已保留断点")
+                        batch_items = items[processed_count:]
+                        if page <= saved_page:
+                            # A refreshed search starts at page one. Rebuild the
+                            # cumulative list before resuming without re-reading
+                            # details or changing the saved checkpoint.
+                            processed_count = len(items)
+                            state = self._search_state(target_id)
+                            processed_ids = (observed.get("identities") or [])[:processed_count]
+                            continue
+                        for raw_item in batch_items:
                             card_index = raw_item.get("card_index") if isinstance(raw_item, dict) else None
                             if card_index is not None:
+                                listed = self._candidate_from_list(raw_item, city, keyword)
+                                listed_accepted = False
+                                if listed is not None:
+                                    salary_reason = self._salary_block_reason(listed)
+                                    if salary_reason:
+                                        hooks.on_event(message=f"智联 列表预筛：{salary_reason}", increment_filtered=True, filtered_candidate=listed)
+                                        continue
+                                    filter_reason = self._filter_reason(listed)
+                                    if filter_reason:
+                                        hooks.on_event(message=filter_reason, increment_filtered=True, filtered_candidate=listed)
+                                        continue
+                                    if not hooks.on_list_candidate(listed):
+                                        continue
+                                    listed_accepted = True
                                 if detail_requests:
                                     delay = max(0.0, self.uniform(*self.delay_range))
                                     hooks.on_event(
@@ -1388,6 +1561,10 @@ class ZhilianCollector:
                                     else:
                                         self.sleep(delay)
                                 hooks.on_event(phase="loading_detail", keyword=keyword, city=city, page=page)
+                                try:
+                                    self._reserve_access("detail_page")
+                                except PlatformSafetyStop as exc:
+                                    return PlatformCollectionResult(self.platform, "completed_with_shortage", exc.reason, "智联详情访问额度或安全锁已阻止本轮继续")
                                 clicked = self._parse_payload(
                                     self.browser.evaluate(target_id, _build_click_card_script(int(card_index)))
                                 )
@@ -1395,7 +1572,10 @@ class ZhilianCollector:
                                     # 卡片懒加载或列表重渲染时可能瞬时未命中，重试后再判定结构变化
                                     for _ in range(2):
                                         self.sleep(1.5)
-                                        self.browser.scroll(target_id, y=2600)
+                                        try:
+                                            self._reserve_access("detail_page")
+                                        except PlatformSafetyStop as exc:
+                                            return PlatformCollectionResult(self.platform, "completed_with_shortage", exc.reason, "智联详情访问额度或安全锁已阻止本轮继续")
                                         clicked = self._parse_payload(
                                             self.browser.evaluate(target_id, _build_click_card_script(int(card_index)))
                                         )
@@ -1412,7 +1592,11 @@ class ZhilianCollector:
                                 else:
                                     self.sleep(1.5)
                                 try:
-                                    detail = self._read_detail_with_retry(target_id, city)
+                                    detail = (
+                                        self._read_matching_detail(target_id, city, listed.source_job_id)
+                                        if listed_accepted and listed is not None
+                                        else self._read_detail_with_retry(target_id, city)
+                                    )
                                     if detail.get("status") == "blocked":
                                         return PlatformCollectionResult(self.platform, "blocked", "rate_limit", "智联页面出现验证或限流，已停止整个采集队列")
                                     if detail.get("status") == "login_required":
@@ -1422,7 +1606,7 @@ class ZhilianCollector:
                                     base = self._candidate_from_list(detail, city, keyword)
                                     if base is None:
                                         raise CollectionError("parse_failed", "智联侧栏详情缺少岗位身份、职位或链接")
-                                    if not hooks.on_list_candidate(base):
+                                    if not listed_accepted and not hooks.on_list_candidate(base):
                                         continue
                                     final = self._candidate_from_detail(detail, base)
                                     if not final.title or not final.company or not final.url or not final.jd:
@@ -1461,6 +1645,10 @@ class ZhilianCollector:
                                 else:
                                     self.sleep(delay)
                             hooks.on_event(phase="loading_detail", keyword=keyword, city=city, page=page)
+                            try:
+                                self._reserve_access("detail_page")
+                            except PlatformSafetyStop as exc:
+                                return PlatformCollectionResult(self.platform, "completed_with_shortage", exc.reason, "智联详情访问额度或安全锁已阻止本轮继续")
                             detail_initial_url = "about:blank" if self.browser.navigate_action is not None else candidate.url
                             detail_target = self.browser.new_tab(detail_initial_url, background=True)
                             if not detail_target:
@@ -1502,16 +1690,29 @@ class ZhilianCollector:
                             if not hooks.on_candidate(final):
                                 return PlatformCollectionResult(self.platform, "completed", "callback_stopped", "采集回调已停止")
                         # 页级断点：每采完一页立即记录页码
-                        if self.safety_conn is not None:
+                        processed_count = len(items)
+                        processed_ids = (observed.get("identities") or [])[:processed_count]
+                        state = self._search_state(target_id)
+                        if state.get("blocked"):
+                            return PlatformCollectionResult(self.platform, "blocked", "blocked", "智联页面出现验证，已停止")
+                        if state.get("login_gate"):
+                            return PlatformCollectionResult(self.platform, "blocked", "login_required", "智联列表要求登录，已停止")
+                        if not hooks.can_checkpoint():
+                            return PlatformCollectionResult(self.platform, "failed", "save_failed", "智联岗位保存失败，保留上一完整批次断点")
+                        hooks.on_page_complete(city, keyword, page)
+                        if self.safety_conn is not None and request.sort == "default" and page > saved_page:
                             upsert_page_progress(self.safety_conn, "zhilian", city, keyword, page)
+                        if state.get("end"):
+                            natural_end = True
+                            break
                 finally:
                     if target_id:
                         self.browser.close_tab(target_id)
                 # 词结束：标记词级断点 + 清页级断点
-                if self.safety_conn is not None:
+                if self.safety_conn is not None and request.sort == "default" and natural_end:
                     mark_combo_collected(self.safety_conn, "zhilian", city, keyword)
                     delete_page_progress(self.safety_conn, "zhilian", city, keyword)
-        return PlatformCollectionResult(self.platform, "completed", "search_exhausted", "智联搜索结果已采集完毕")
+        return PlatformCollectionResult(self.platform, "completed", "page_budget_reached", "智联本轮批次已处理完毕；仅明确末页的关键词记为采集完成")
 
     @staticmethod
     def _candidate_from_list(raw: Any, city: str, keyword: str) -> JobCandidate | None:
