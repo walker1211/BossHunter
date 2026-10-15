@@ -168,6 +168,14 @@ class ScorerTokenResilienceTests(unittest.TestCase):
           "tools_industry": {"score": 8, "evidence": "熟悉SaaS业务"},
           "practical_fit": {"score": 9, "evidence": "地点薪资符合"},
           "caps": ["technical_required"],
+          "technical_required_assessment": {
+            "requirement": "必须熟练使用Linux并独立部署",
+            "is_core_required": true,
+            "evidence_status": "not_met",
+            "candidate_evidence": "仅使用 Windows，无法在 Linux 上部署服务",
+            "blocks_core_work": true,
+            "blocking_reason": "核心工作必须在 Linux 上独立部署"
+          },
           "hard_gaps": ["必须熟练使用Linux并独立部署"],
           "reason": "交付经验匹配，但存在硬技术缺口",
           "missing": "Linux部署"

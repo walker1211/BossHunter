@@ -6,8 +6,10 @@ from bosshunter.agent_api import AgentRequestError, validate_agent_evaluations
 from bosshunter.ai import scorer
 
 
-def _payload(*, hard: int = 8, practical: int = 10, caps: list[str] | None = None) -> dict:
-    return {
+def _payload(
+    *, hard: int = 8, practical: int = 10, caps: list[str] | None = None,
+) -> dict:
+    payload = {
         "role_summary": "虚构后端岗位",
         "core_duties": {"score": 34, "evidence": "有后端交付记录"},
         "transferable_evidence": {"score": 23, "evidence": "有可迁移项目"},
@@ -19,6 +21,16 @@ def _payload(*, hard: int = 8, practical: int = 10, caps: list[str] | None = Non
         "reason": "通用后端经验相关，关键框架待核",
         "missing": "实际项目证据",
     }
+    if "technical_required" in payload["caps"]:
+        payload["technical_required_assessment"] = {
+            "requirement": "必须熟练掌握 Linux 部署",
+            "is_core_required": True,
+            "evidence_status": "not_met",
+            "candidate_evidence": "仅使用 Windows，无法在 Linux 上部署服务",
+            "blocks_core_work": True,
+            "blocking_reason": "岗位核心工作需要独立在 Linux 上部署服务",
+        }
+    return payload
 
 
 def _result(**kwargs) -> scorer.ScoreResult:

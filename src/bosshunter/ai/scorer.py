@@ -1,6 +1,7 @@
 """AI Scorer - Match jobs against resume using Claude API."""
 
 import json
+import re
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -86,12 +87,13 @@ SCORING_PROMPT = """你是一位严谨的招聘匹配评估员。请依据完整
 区间有交集（含端点相等）即存在可谈薪资，预筛仍可通过；交集不代表承诺拿到该薪资。岗位上限低于期望上限且只覆盖期望区间不超过25%时，实际条件最高6分；仅触及期望下限时最高5分。覆盖充分时不得仅因岗位下限偏低或上限偏高扣分。0表示该边界未设置。薪资只影响“实际条件”，不得影响职责、经验或硬性要求分数。
 
 ## 封顶规则
-仅在JD把相关内容作为核心职责或明确必备条件，且简历没有相应证据时填写caps：
-- technical_required：必须掌握SQL、Linux、编程、服务器/私有化部署等硬技术，最终最高55分。
+仅在符合各条触发条件时填写caps，不得把所有简历缺证统一当成不满足：
+- technical_required：仅在已有明确证据证明候选人不满足JD核心且明确必备的硬技术，并会阻断核心工作时，最终最高55分。简历未写、未体现、证据不足、相邻经验或熟练度待确认只能列待核，不得触发此封顶。不得把未提及当成明确不会或没有经验。
 - sales_acquisition_core：岗位核心是销售获客、业绩指标或陌生开发，但简历没有对应证据，最终最高65分。
 - weak_core_transfer：只有少量辅助职责可迁移，核心工作缺少直接或相邻证据，最终最高70分。
 程序还会自动执行：人工明确低优先级时，manual_low_priority最高65分。必备框架的实际项目经验必须逐项核对，通用语言经验不能自动证明做过该框架项目；仅优先项不得据此降低硬性要求分数。
-行业“优先”、工具可入职后学习、普通协作事项均不得触发封顶。已有实质相邻证据时不能仅因行业或职位名称不同触发weak_core_transfer。hard_gaps只写JD明确必备且未获证据支持或明确不满足的内容，区分“未体现”和“明确不满足”，不得把待确认意愿写成硬缺口。每个cap必须在理由中指出对应的JD要求及证据缺口。
+行业“优先”、工具可入职后学习、普通协作事项均不得触发封顶。已有实质相邻证据时不能仅因行业或职位名称不同触发weak_core_transfer。技术条件未体现时在missing中明确列“待核”，相关分项按证据评分，不按已满足给满分；hard_gaps仅列有明确不满足证据的必备条件，不把待核项写成已确认不满足。
+请求technical_required必须同时提供technical_required_assessment：逐字引用JD必备原文和简历中明确不满足的原文，并说明为何阻断核心工作。没有明确反证时evidence_status为unverified或adjacent，不填此cap。JD的“A或B”需核对完整替代范围，有任一满足证据不得认定不满足；优先项、非核心要求或不会阻断核心工作的差距不得触发此cap。每个cap必须在理由中说明触发依据。
 
 请严格输出一个JSON对象，不要Markdown，不要额外说明。先写每项evidence再给score，引用具体工作或项目事实；五个score必须是整数且不得超过各自上限：
 {{
@@ -102,16 +104,21 @@ SCORING_PROMPT = """你是一位严谨的招聘匹配评估员。请依据完整
   "tools_industry": {{"evidence": "已有相关工具与行业证据，再说明细分方向差距（80字内）", "score": 0}},
   "practical_fit": {{"evidence": "城市与薪资核对结果，其他条件只用已知事实（60字内）", "score": 0}},
   "caps": [],
-  "hard_gaps": ["有硬缺口时写：JD必备原文→未体现或不满足；仅优先、加分项不可列入；无硬缺口时输出空数组"],
+  "technical_required_assessment": null,
+  "hard_gaps": ["仅写：JD必备原文→明确不满足的证据；未体现列missing待核；无明确不满足时输出空数组"],
   "reason": "最关键的匹配判断（60字内）",
   "missing": "最关键缺失（40字内，没有则为空）"
 }}
+technical_required_assessment无相关技术判断时为null，否则对象格式为：
+{{"requirement": "JD核心必备技术的逐字原文，保留或、优先等连接词", "is_core_required": false, "evidence_status": "unverified", "candidate_evidence": "明确不满足时引用简历逐字原文；仅未写时为空", "blocks_core_work": false, "blocking_reason": "明确不满足会阻断何种核心工作；待核时为空"}}
+evidence_status只能为met（已有证据满足）、adjacent（相邻证据）、unverified（未体现待核）、not_met（明确不满足）。三个必需事实是核心必备、明确不满足、阻断核心工作，不能用同一个缺证推断替代。
 """
 
 REVIEW_PROMPT_SUFFIX = """
 
 ## 独立复核
 下面是第一次评估结果。请重新核对简历证据与JD，不要迎合第一次结果；仍按上面的同一JSON结构输出各维度分数，不要输出总分。
+重点复核technical_required是否有明确不满足核心必备技术且阻断核心工作的原文证据；仅未写或待核必须撤销此cap。复核可以明确撤销初评误判，不得因初评已有标签就沿用。
 第一次评估：{first_result}
 """
 
@@ -159,6 +166,9 @@ class ScoreResult:
     component_evidence: dict[str, str]
     hard_gaps: tuple[str, ...]
     reviewed: bool
+    technical_assessment: dict | None = None
+    technical_cap_requested: bool = False
+    technical_cap_rejected: bool = False
 
 
 @dataclass(frozen=True)
@@ -304,6 +314,9 @@ def _build_review_prompt(job: dict, resume: str, first: ScoreResult, config: dic
         "caps": list(first.caps),
         "reason": first.summary_reason,
         "missing": first.missing,
+        "technical_required_assessment": first.technical_assessment,
+        "technical_cap_requested": first.technical_cap_requested,
+        "technical_cap_rejected": first.technical_cap_rejected,
     }
     return _build_scoring_prompt(job, resume, config) + REVIEW_PROMPT_SUFFIX.format(
         first_result=json.dumps(first_result, ensure_ascii=False),
@@ -380,7 +393,64 @@ def _format_structured_reason(
     return score, raw_score, reason
 
 
-def _structured_score_result(result: dict, *, reviewed: bool = False) -> ScoreResult | None:
+def _normalize_technical_assessment(value: object) -> dict | None:
+    """Keep a narrow, internal-only record of a proposed technical blocker."""
+    if not isinstance(value, dict):
+        return None
+    status = value.get("evidence_status")
+    if not isinstance(status, str) or status not in {"met", "adjacent", "unverified", "not_met"}:
+        return None
+    if not isinstance(value.get("is_core_required"), bool) or not isinstance(value.get("blocks_core_work"), bool):
+        return None
+    return {
+        "requirement": _normalize_short_text(value.get("requirement"), COMPONENT_EVIDENCE_LIMIT),
+        "is_core_required": value["is_core_required"],
+        "evidence_status": status,
+        "candidate_evidence": _normalize_short_text(value.get("candidate_evidence"), COMPONENT_EVIDENCE_LIMIT),
+        "blocks_core_work": value["blocks_core_work"],
+        "blocking_reason": _normalize_short_text(value.get("blocking_reason"), COMPONENT_EVIDENCE_LIMIT),
+    }
+
+
+def _technical_cap_supported(
+    assessment: dict | None, hard_gaps: tuple[str, ...], hard_score: int,
+    *, job: dict | None = None, resume: str | None = None,
+) -> bool:
+    """Missing evidence cannot establish a confirmed, core technical blocker."""
+    if not assessment or hard_score == 15 or not hard_gaps:
+        return False
+    if (assessment["is_core_required"] is not True or assessment["evidence_status"] != "not_met"
+            or assessment["blocks_core_work"] is not True):
+        return False
+    requirement, evidence = assessment["requirement"], assessment["candidate_evidence"]
+    if not requirement or not evidence or not assessment["blocking_reason"]:
+        return False
+    unknown_markers = (
+        "未体现", "未提及", "未写", "没有写", "待核", "待确认", "未明确", "证据不足", "没有证据", "未获",
+        "not mentioned", "not evidenced", "not documented", "unknown", "unverified",
+    )
+    if any(marker in evidence.casefold() for marker in unknown_markers):
+        return False
+    if not re.search(
+        r"不会|不熟悉|不掌握|不具备|不满足|无法|不能|从未|未曾|未使用过|未做过|"
+        r"没有.{0,40}(?:经验|能力|接触|使用|做过)|无.{0,40}(?:经验|能力)|"
+        r"\b(?:never|cannot)\b|can't|\bno\b.{0,40}\b(?:experience|ability)\b|"
+        r"\bnot\b.{0,20}\b(?:proficient|familiar|able)\b",
+        evidence, re.IGNORECASE,
+    ):
+        return False
+    # The real AI and Agent entry points bind quotes to the supplied source
+    # material. Unit-level payload validation can omit that context.
+    if job is not None and requirement not in " ".join(clean_job_description(job.get("jd", "")).split()):
+        return False
+    if resume is not None and evidence not in " ".join(resume.split()):
+        return False
+    return True
+
+
+def _structured_score_result(
+    result: dict, *, reviewed: bool = False, job: dict | None = None, resume: str | None = None,
+) -> ScoreResult | None:
     components: dict[str, int] = {}
     component_evidence: dict[str, str] = {}
     for key, limit in COMPONENT_LIMITS.items():
@@ -413,6 +483,18 @@ def _structured_score_result(result: dict, *, reviewed: bool = False) -> ScoreRe
         item_limit=HARD_GAP_LIMIT,
         maximum=MAX_HARD_GAPS,
     )
+    technical_assessment = _normalize_technical_assessment(result.get("technical_required_assessment"))
+    technical_cap_requested = "technical_required" in caps
+    technical_cap_rejected = technical_cap_requested and not _technical_cap_supported(
+        technical_assessment, hard_gaps, components["hard_requirements"], job=job, resume=resume,
+    )
+    if technical_cap_rejected:
+        caps = tuple(cap for cap in caps if cap != "technical_required")
+        summary_reason = "技术封顶依据未成立，保留分项评分，相关技术要求列待核。"
+        missing = _normalize_short_text("待核：" + (missing or "技术要求及满足情况"), MISSING_LIMIT)
+        hard_gaps = tuple(_normalize_short_text(
+            gap if gap.startswith("待核") else "待核：" + gap, HARD_GAP_LIMIT,
+        ) for gap in hard_gaps)
     score, raw_score, reason = _format_structured_reason(
         components,
         caps,
@@ -433,6 +515,9 @@ def _structured_score_result(result: dict, *, reviewed: bool = False) -> ScoreRe
         component_evidence=component_evidence,
         hard_gaps=hard_gaps,
         reviewed=reviewed,
+        technical_assessment=technical_assessment,
+        technical_cap_requested=technical_cap_requested,
+        technical_cap_rejected=technical_cap_rejected,
     )
 
 
@@ -444,13 +529,15 @@ def _apply_field_aliases(result: dict) -> dict:
     return result
 
 
-def _validated_score_result(text: str) -> ScoreResult | None:
+def _validated_score_result(text: str, *, job: dict | None = None, resume: str | None = None) -> ScoreResult | None:
     """Accept only complete structured evidence scores."""
     result = _parse_score_response(text)
-    return validate_structured_score_payload(result)
+    return validate_structured_score_payload(result, job=job, resume=resume)
 
 
-def validate_structured_score_payload(value: object, *, reviewed: bool = False) -> ScoreResult | None:
+def validate_structured_score_payload(
+    value: object, *, reviewed: bool = False, job: dict | None = None, resume: str | None = None,
+) -> ScoreResult | None:
     """Validate a structured score supplied by a local Agent or an AI provider."""
     if not isinstance(value, dict):
         return None
@@ -458,7 +545,7 @@ def validate_structured_score_payload(value: object, *, reviewed: bool = False) 
     _apply_field_aliases(result)
     if not all(key in result for key in COMPONENT_LIMITS):
         return None
-    return _structured_score_result(result, reviewed=reviewed)
+    return _structured_score_result(result, reviewed=reviewed, job=job, resume=resume)
 
 
 def _score_validation_failure_reason(text: str | None) -> str:
@@ -476,7 +563,7 @@ def _score_validation_failure_reason(text: str | None) -> str:
 
 
 def _merge_review_results(first: ScoreResult, review: ScoreResult) -> ScoreResult:
-    """Average two independent structured assessments and keep the stricter cap."""
+    """Average components; let the latest verified technical assessment revoke a cap."""
     components = {
         key: (first.components[key] + review.components[key]) // 2
         for key in COMPONENT_LIMITS
@@ -489,7 +576,7 @@ def _merge_review_results(first: ScoreResult, review: ScoreResult) -> ScoreResul
         if (first.components[key] + review.components[key]) % 2:
             components[key] += 1
             remainder -= 1
-    caps = tuple(dict.fromkeys((*first.caps, *review.caps)))
+    caps = tuple(dict.fromkeys((*(cap for cap in first.caps if cap != "technical_required"), *review.caps)))
     missing = review.missing or first.missing
     score, raw_score, reason = _format_structured_reason(
         components,
@@ -512,8 +599,12 @@ def _merge_review_results(first: ScoreResult, review: ScoreResult) -> ScoreResul
             key: review.component_evidence.get(key) or first.component_evidence.get(key, "")
             for key in COMPONENT_LIMITS
         },
-        hard_gaps=tuple(dict.fromkeys((*first.hard_gaps, *review.hard_gaps))),
+        hard_gaps=(review.hard_gaps if first.technical_cap_requested
+                   else tuple(dict.fromkeys((*first.hard_gaps, *review.hard_gaps)))),
         reviewed=True,
+        technical_assessment=review.technical_assessment,
+        technical_cap_requested=review.technical_cap_requested,
+        technical_cap_rejected=review.technical_cap_rejected,
     )
 
 
@@ -757,7 +848,7 @@ def _request_score(
             # str(exc) 现在带 kind/status_code，UI 才能区分限流/鉴权/额度等失败原因（issue #101）。
             return ScoreOutcome(pause_reason=str(exc))
 
-    result = _validated_score_result(response) if response else None
+    result = _validated_score_result(response, job=job, resume=resume) if response else None
     for attempt in range(2, max_attempts + 1):
         if result is not None:
             break
@@ -771,7 +862,7 @@ def _request_score(
             if retry_exc.kind in {"token_quota", "rate_limit", "auth", "network", "request_failed"}:
                 return ScoreOutcome(pause_reason=str(retry_exc))
             response = None
-        result = _validated_score_result(response) if response else None
+        result = _validated_score_result(response, job=job, resume=resume) if response else None
 
     if result is None:
         return ScoreOutcome(failure_detail=_score_validation_failure_reason(response))
@@ -784,7 +875,7 @@ def _score_job_with_ai(
     config: dict,
     max_attempts: int,
 ) -> ScoreOutcome:
-    """Run primary scoring and an optional independent review for borderline results."""
+    """Review borderline scores and every proposed technical blocker when enabled."""
     outcome = _request_score(job, resume, config, max_attempts)
     first = outcome.result
     if first is None or outcome.pause_reason:
@@ -794,7 +885,9 @@ def _score_job_with_ai(
 
     ai_cfg = config.get("ai", {}) if isinstance(config.get("ai"), dict) else {}
     review_enabled = ai_cfg.get("scoring_second_review", False) is True
-    if not review_enabled or not first.structured or not 68 <= first.score <= 79:
+    needs_review = (68 <= first.score <= 79 or 68 <= first.raw_score <= 79
+                    or first.technical_cap_requested or first.technical_cap_rejected)
+    if not review_enabled or not first.structured or not needs_review:
         return outcome
 
     try:
@@ -805,7 +898,7 @@ def _score_job_with_ai(
         _notify(config, f"{job['company']}｜{job['title']} 二次复核未完成，保留第一次评分。")
         return outcome
 
-    review = _validated_score_result(response) if response else None
+    review = _validated_score_result(response, job=job, resume=resume) if response else None
     if review is None or not review.structured:
         _notify(config, f"{job['company']}｜{job['title']} 二次复核格式无效，保留第一次评分。")
         return outcome

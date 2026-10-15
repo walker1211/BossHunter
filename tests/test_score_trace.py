@@ -47,6 +47,14 @@ def _score_payload(**overrides) -> dict:
         "tools_industry": {"score": 7, "evidence": "熟悉 SaaS 和常用数据工具"},
         "practical_fit": {"score": 8, "evidence": "城市和薪资条件匹配"},
         "caps": ["technical_required"],
+        "technical_required_assessment": {
+            "requirement": "必须熟练掌握 Linux 私有化部署",
+            "is_core_required": True,
+            "evidence_status": "not_met",
+            "candidate_evidence": "仅使用 Windows，无法独立完成 Linux 部署",
+            "blocks_core_work": True,
+            "blocking_reason": "核心职责要求独立完成 Linux 私有化部署",
+        },
         "hard_gaps": ["缺少 Linux 私有化部署经历"],
         "reason": "产品交付经验匹配，但有硬技术缺口",
         "missing": "Linux 部署",
@@ -117,10 +125,11 @@ def test_missing_evidence_and_malformed_hard_gaps_do_not_invalidate_structured_s
 
     assert result.component_evidence["core_duties"] == ""
     assert result.hard_gaps == ()
-    assert result.score == 55
+    assert result.score == result.raw_score == 82
+    assert result.caps == ()
 
 
-def test_review_merge_prefers_review_evidence_and_unions_hard_gaps_stably():
+def test_review_merge_prefers_review_evidence_and_revokes_technical_gap():
     first = _result(
         role_summary="初评岗位概括",
         hard_gaps=["缺少 Linux", "缺少 SQL"],
@@ -138,8 +147,8 @@ def test_review_merge_prefers_review_evidence_and_unions_hard_gaps_stably():
     assert merged.reviewed is True
     assert merged.role_summary == "复核岗位概括"
     assert merged.component_evidence["core_duties"] == "复核职责证据"
-    assert merged.hard_gaps == ("缺少 Linux", "缺少 SQL", "缺少部署")
-    assert merged.caps == ("technical_required", "weak_core_transfer")
+    assert merged.hard_gaps == ("缺少 SQL", "缺少部署")
+    assert merged.caps == ("weak_core_transfer",)
 
 
 def test_trace_builder_has_only_contract_fields_and_never_includes_raw_inputs():
@@ -179,6 +188,21 @@ def test_trace_sanitizer_rejects_boolean_schema_version():
     trace["schema_version"] = True
 
     assert scorer.sanitize_score_trace(trace) is None
+
+
+def test_historical_technical_55_trace_remains_readable_without_revalidation():
+    historical = scorer.build_score_trace(_result())
+    historical["raw_score"] = 82
+    historical["final_score"] = 55
+    historical["caps"] = ["technical_required"]
+
+    sanitized = scorer.sanitize_score_trace(historical)
+    assert sanitized is not None
+    assert sanitized["raw_score"] == 82
+    assert sanitized["final_score"] == 55
+    assert sanitized["caps"] == ["technical_required"]
+    assert "technical_required_assessment" not in sanitized
+    assert "technical_assessment" not in sanitized
 
 
 def test_score_trace_table_migrates_legacy_database_without_rewriting_jobs(tmp_path):

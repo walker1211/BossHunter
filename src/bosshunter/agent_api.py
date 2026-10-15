@@ -36,7 +36,7 @@ def validate_agent_evaluations(
     if len(value) > _MAX_AGENT_EVALUATIONS:
         raise AgentRequestError(f"每次最多提交 {_MAX_AGENT_EVALUATIONS} 个岗位评估")
 
-    from bosshunter.ai.scorer import apply_job_score_policy, build_score_trace, validate_structured_score_payload
+    from bosshunter.ai.scorer import _load_resume, apply_job_score_policy, build_score_trace, validate_structured_score_payload
 
     evaluations: list[dict[str, Any]] = []
     seen_job_ids: set[str] = set()
@@ -50,7 +50,15 @@ def validate_agent_evaluations(
             raise AgentRequestError("同一岗位不能重复提交评分")
         seen_job_ids.add(job_id)
 
-        score_result = validate_structured_score_payload(item.get("score"))
+        score_payload = item.get("score")
+        proposed_caps = score_payload.get("caps") if isinstance(score_payload, dict) else None
+        # Bind a proposed blocker to actual sources rather than an Agent's
+        # invented quote. Ordinary submissions do not need to read the resume.
+        resume = (_load_resume(config or {}) if isinstance(proposed_caps, list)
+                  and "technical_required" in proposed_caps else "")
+        score_result = validate_structured_score_payload(
+            score_payload, job=(jobs_by_id or {}).get(job_id, {}), resume=resume,
+        )
         if score_result is None:
             raise AgentRequestError("score 必须符合 BossHunter 的完整结构化评分格式")
         if jobs_by_id is not None and job_id in jobs_by_id:
