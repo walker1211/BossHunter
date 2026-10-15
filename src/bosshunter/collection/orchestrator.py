@@ -25,6 +25,7 @@ from bosshunter.collection_run_store import (
     save_boss_checkpoint, update_collection_run,
 )
 from bosshunter.db import get_db, insert_job_if_new, job_identity_exists, recompute_outsourcing
+from bosshunter.employment import internship_config_error
 from bosshunter.job_filters import hr_activity_filter_reason, matching_blocked_company, matching_deal_breaker
 from bosshunter.outsourcing import load_rules
 
@@ -125,7 +126,14 @@ def normalize_collection_options(config: dict[str, Any], raw_options: dict[str, 
     }
     if supplied.get("resume_run_id"):
         options["resume_run_id"] = supplied["resume_run_id"]
-    return validate_collection_options(options)
+    normalized = validate_collection_options(options)
+    if "boss" in normalized["platform_order"]:
+        effective = {"profile": config.get("profile", {}), "platforms": {
+            "boss": {"search": {"filters": normalized["platforms"]["boss"]["filters"]}},
+        }}
+        if conflict := internship_config_error(effective):
+            raise ValueError(conflict)
+    return normalized
 
 
 def validate_collection_options(options: dict[str, Any]) -> dict[str, Any]:
@@ -243,16 +251,36 @@ class _SharedProcessor:
             max_pages=request.max_pages,
         )
         self.new_job_ids: list[str] = []
+        self.filter_records: list[dict[str, str]] = []
+        self.error_records: list[dict[str, Any]] = []
 
     def event(self, *, phase: str | None = None, **values: Any) -> None:
         if phase:
             self.progress.phase = phase
+        candidate = values.pop("filtered_candidate", None)
         if values.pop("increment_filtered", False):
             self.progress.filtered += 1
+            if isinstance(candidate, JobCandidate):
+                self.filter_records.append({
+                    "title": candidate.title[:300], "company": candidate.company[:300],
+                    "source_job_id": candidate.source_job_id[:200],
+                    "reason": str(values.get("message") or "命中过滤规则")[:500],
+                })
+                self.filter_records = self.filter_records[-200:]
         for key, value in values.items():
             if hasattr(self.progress, key):
                 setattr(self.progress, key, value)
         self.emit(self.progress)
+
+    def record_failure(self, kind: str, reason: str, candidate: JobCandidate | None = None) -> None:
+        self.error_records.append({
+            "kind": kind, "reason": reason[:500],
+            "title": candidate.title[:300] if candidate else "",
+            "company": candidate.company[:300] if candidate else "",
+            "city": self.progress.city, "keyword": self.progress.keyword,
+            "page": self.progress.page,
+        })
+        self.error_records = self.error_records[-200:]
 
     def inspect(self, candidate: JobCandidate) -> bool:
         self.progress.seen += 1
@@ -266,13 +294,11 @@ class _SharedProcessor:
             self.event()
             return False
         profile = self.config.get("profile", {}) if isinstance(self.config.get("profile"), dict) else {}
-        if matching_deal_breaker(candidate.title, profile.get("deal_breakers") or []):
-            self.progress.filtered += 1
-            self.event(message="职位名命中过滤规则")
+        if matched := matching_deal_breaker(candidate.title, profile.get("deal_breakers") or []):
+            self.event(message=f"职位名命中排除词：{matched}", increment_filtered=True, filtered_candidate=candidate)
             return False
-        if matching_blocked_company(candidate.company, profile.get("blocked_companies") or []):
-            self.progress.filtered += 1
-            self.event(message="公司命中过滤规则")
+        if matched := matching_blocked_company(candidate.company, profile.get("blocked_companies") or []):
+            self.event(message=f"公司命中屏蔽规则：{matched}", increment_filtered=True, filtered_candidate=candidate)
             return False
         self.event()
         return True
@@ -283,18 +309,18 @@ class _SharedProcessor:
         # merely because their collectors do not expose HR activity.
         reason = hr_activity_filter_reason(candidate.hr_active, profile) if candidate.platform == "boss" else None
         if reason:
-            self.progress.filtered += 1
-            self.event(message=reason)
+            self.event(message=reason, increment_filtered=True, filtered_candidate=candidate)
             return True
-        if matching_deal_breaker(candidate.jd, profile.get("jd_deal_breakers") or []):
-            self.progress.filtered += 1
-            self.event(message="JD 命中过滤规则")
+        if matched := matching_deal_breaker(candidate.jd, profile.get("jd_deal_breakers") or []):
+            self.event(message=f"JD 命中排除词：{matched}", increment_filtered=True, filtered_candidate=candidate)
             return True
         try:
             inserted = insert_job_if_new(self.conn, candidate.as_job_record(), rules=self.outsourcing_rules)
         except Exception as exc:
             self.progress.save_failed += 1
-            self.event(message=f"保存岗位失败：{type(exc).__name__}")
+            reason = f"保存岗位失败：{type(exc).__name__}"
+            self.record_failure("save", reason, candidate)
+            self.event(message=reason)
             return True
         if inserted:
             self.new_job_ids.append(candidate.storage_id)
@@ -381,14 +407,18 @@ class CollectionOrchestrator:
                 )
                 if previous:
                     processor.new_job_ids = list(previous["collected_job_ids"])
+                    processor.filter_records = list(previous["platform_states"].get(platform, {}).get("filter_records") or [])[-200:]
+                    processor.error_records = list(previous["platform_states"].get(platform, {}).get("error_records") or [])[-200:]
                     for name in ("seen", "duplicate", "filtered", "parse_failed", "save_failed"):
                         setattr(processor.progress, name, int(previous["platform_states"].get(platform, {}).get(name) or 0))
                 prior_save_failures = processor.progress.save_failed
                 # Bind the processor into the callback after construction so the
                 # current platform's progress is not confused with prior IDs.
-                processor.emit = lambda progress, p=platform, processor_ref=processor: self._emit(
-                    states, p, progress, all_new_ids, processor_ref.new_job_ids
-                )
+                def emit(progress, p=platform, processor_ref=processor):
+                    states[p]["filter_records"] = list(processor_ref.filter_records)
+                    states[p]["error_records"] = list(processor_ref.error_records)
+                    self._emit(states, p, progress, all_new_ids, processor_ref.new_job_ids)
+                processor.emit = emit
                 hooks = CollectorHooks(
                     stop_event=self.stop_event,
                     on_list_candidate=processor.inspect,
@@ -413,9 +443,9 @@ class CollectionOrchestrator:
                     )
                     result = collector.collect(request, hooks)
                 except CollectionError as exc:
-                    result = PlatformCollectionResult(platform, "blocked", exc.code, exc.message, error=str(exc))
-                except Exception as exc:
-                    result = PlatformCollectionResult(platform, "failed", "network_error", f"{platform} 采集失败", error=str(exc)[:500])
+                    result = PlatformCollectionResult(platform, "blocked", exc.code, exc.message, error=exc.code)
+                except Exception:
+                    result = PlatformCollectionResult(platform, "failed", "network_error", f"{platform} 采集失败", error="network_error")
                 result.new_job_ids = list(processor.new_job_ids)
                 result.counts = self._counts(processor.progress)
                 if platform == "boss" and result.status in {"completed", "completed_with_shortage"}:
@@ -473,9 +503,9 @@ class CollectionOrchestrator:
                 score_config = dict(self.config)
                 score_config["_workbench_stop_event"] = self.stop_event
                 score_jobs(score_config, scope="selected", job_ids=unique_new_ids, limit=None, force_rescore=False)
-            except Exception as exc:
+            except Exception:
                 outcome = "completed_with_errors"
-                self._persist(states, unique_new_ids, "", error=f"自动评分失败：{str(exc)[:500]}")
+                self._persist(states, unique_new_ids, "", error="自动评分失败")
         self._persist(states, unique_new_ids, "", status=outcome, stop_reason="user_stopped" if stopped else "")
         return {
             "run_id": self.run_id,
@@ -494,6 +524,7 @@ class CollectionOrchestrator:
 
     def _parse_failed(self, processor: _SharedProcessor, reason: str) -> None:
         processor.progress.parse_failed += 1
+        processor.record_failure("parse", reason)
         processor.event(phase="loading_detail", message=reason)
 
     def _emit(

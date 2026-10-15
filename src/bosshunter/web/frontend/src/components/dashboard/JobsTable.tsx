@@ -2,13 +2,14 @@ import { Fragment, useEffect, useId, useRef, useState } from 'react'
 import { OutsourcingBadge } from '@/components/jobs/OutsourcingBadge'
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
-import { CheckCircle2, ChevronDown, ChevronUp, ExternalLink, Trash2 } from 'lucide-react'
+import { Ban, CheckCircle2, ChevronDown, ChevronUp, ExternalLink, Trash2 } from 'lucide-react'
 import { getStatusLabel } from '@/lib/status'
 import { PLATFORM_SHORT_LABELS } from '@/lib/platforms'
 import { safeCompanyProfileUrl, workScheduleDescription, workScheduleLabel, workScheduleSourceLabel } from '@/lib/workSchedule'
 import { commuteDescription, commuteLabel, safeCommuteSourceUrl } from '@/lib/commute'
 import type { Job } from '@/hooks/useDashboard'
 import type { JobSortKey, JobSortOrder } from '@/hooks/useJobSearch'
+import { InterviewPreparation } from '@/components/jobs/InterviewPreparation'
 
 interface JobsTableProps {
   jobs: Job[]
@@ -21,6 +22,9 @@ interface JobsTableProps {
   onSoftDelete?: (job: Job) => void
   onMarkManuallySent?: (job: Job) => void
   onStatusChange?: (job: Job, status: string) => void
+  onBlockCompany?: (job: Job) => void
+  blockedCompanies?: string[]
+  blockingJobId?: string | null
   loading?: boolean
   sortBy: JobSortKey
   sortOrder: JobSortOrder
@@ -121,11 +125,11 @@ function ExpandableJobText({ label, value, fallback }: { label: string, value?: 
   )
 }
 
-export function JobsTable({ jobs, page, pageSize, total, onPageChange, selectedIds, onToggleSelected, onSoftDelete, onMarkManuallySent, onStatusChange, loading = false, sortBy, sortOrder, onSortChange }: JobsTableProps) {
+export function JobsTable({ jobs, page, pageSize, total, onPageChange, selectedIds, onToggleSelected, onSoftDelete, onMarkManuallySent, onStatusChange, onBlockCompany, blockedCompanies = [], blockingJobId = null, loading = false, sortBy, sortOrder, onSortChange }: JobsTableProps) {
   const [expanded, setExpanded] = useState<string | null>(null)
   const [pageInput, setPageInput] = useState(String(page + 1))
   const totalPages = Math.ceil(total / pageSize)
-  const hasActions = Boolean(onSoftDelete || onMarkManuallySent || onStatusChange)
+  const hasActions = Boolean(onSoftDelete || onMarkManuallySent || onStatusChange || onBlockCompany)
 
   useEffect(() => {
     setPageInput(String(page + 1))
@@ -204,6 +208,8 @@ export function JobsTable({ jobs, page, pageSize, total, onPageChange, selectedI
                 const companyProfileUrl = safeCompanyProfileUrl(job.company_url)
                 const commuteSourceUrl = safeCommuteSourceUrl(job.commute_source_url)
                 const alreadySent = ['sent', 'replied', 'resume_sent', 'needs_resume', 'follow_up_sent'].includes(job.status)
+                const company = (job.company || '').trim()
+                const blockedRule = blockedCompanies.find(rule => rule.trim() && company.toLowerCase().includes(rule.trim().toLowerCase()))
                 return (
                   <Fragment key={job.id}>
                     <tr
@@ -250,6 +256,8 @@ export function JobsTable({ jobs, page, pageSize, total, onPageChange, selectedI
                       <td className="px-4 py-3 text-muted">{job.salary || '-'}</td>
                       <td className="px-4 py-3 text-xs">
                         <div className="font-bold text-foreground">{job.education || '学历未识别'}</div>
+                        <div className="mt-1 text-muted">职位类型：{job.employment_type === 'internship' ? '实习' : job.employment_type === 'full_time' ? '全职' : job.employment_type === 'part_time' ? '兼职' : '待核实'}</div>
+                        {job.employment_review && <div className="mt-1 text-amber-600">{job.employment_review}</div>}
                         <div className="mt-1 text-muted">{job.recruitment_type === 'campus' ? '校招' : job.recruitment_type === 'experienced' ? '社招' : '类型未识别'}</div>
                       </td>
                       <td className="px-4 py-3">
@@ -302,6 +310,18 @@ export function JobsTable({ jobs, page, pageSize, total, onPageChange, selectedI
                                 <Trash2 className="h-4 w-4" />
                               </button>
                             )}
+                            {onBlockCompany && (
+                              <button
+                                type="button"
+                                disabled={!company || Boolean(blockedRule) || Boolean(blockingJobId)}
+                                onClick={() => onBlockCompany(job)}
+                                aria-label={`屏蔽公司 ${company || '公司名缺失'}`}
+                                title={blockedRule ? `已被“${blockedRule}”屏蔽，可在配置中解除` : company ? '预览后将公司加入屏蔽名单' : '缺少公司名称，无法屏蔽'}
+                                className="inline-flex items-center gap-1 rounded-lg border border-card-border px-2 py-1.5 text-[11px] font-bold text-muted hover:bg-danger-soft hover:text-danger disabled:cursor-not-allowed disabled:opacity-50"
+                              >
+                                <Ban className="h-3.5 w-3.5" />{blockingJobId === job.id ? '处理中…' : blockedRule ? '已屏蔽' : '屏蔽公司'}
+                              </button>
+                            )}
                             {onStatusChange && !alreadySent && (
                               <select
                                 defaultValue=""
@@ -328,6 +348,9 @@ export function JobsTable({ jobs, page, pageSize, total, onPageChange, selectedI
                       <tr className="border-b border-card-border bg-surface">
                         <td id={`job-details-${job.id}`} colSpan={hasActions ? 12 : 11} className="px-6 py-4">
                           <div className="sticky left-6 w-[calc(100cqw-3rem)] max-w-full min-w-0">
+                            <div className="mb-4 max-w-2xl">
+                              <InterviewPreparation key={job.id} job={job} />
+                            </div>
                             <div className="grid gap-4 text-sm [grid-template-columns:repeat(auto-fit,minmax(min(100%,18rem),1fr))]">
                               <ExpandableJobText label="JD摘要" value={job.jd} fallback="无" />
                               <ExpandableJobText label="招呼语" value={job.greeting} fallback="未生成" />

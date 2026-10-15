@@ -5,6 +5,8 @@ Serves:
 - /* → Frontend static files (dist/)
 """
 
+from bosshunter.employment import classify_employment, internship_rejection
+
 import json
 from ipaddress import ip_address
 from urllib.parse import urlsplit
@@ -34,7 +36,13 @@ from bosshunter.ai.credentials import AIRequestError, get_ai_api_key, list_ai_mo
 from bosshunter.ai.scorer import sanitize_score_trace
 from bosshunter.scoring_review import get_manual_company_review, score_reason_body
 from bosshunter.cities import CityRefreshError, get_city_map, load_city_snapshot, refresh_city_cache
-from bosshunter.config import AI_SERVICE_PRESETS, load_config, remove_retired_collection_settings, save_config
+from bosshunter.config import (
+	AI_SERVICE_PRESETS,
+	load_config,
+	remove_retired_collection_settings,
+	save_config,
+	validate_config_send_windows,
+)
 from bosshunter.db import (
 	GREETING_ALLOWED_STATUSES,
 	REJECT_ALLOWED_STATUSES,
@@ -84,6 +92,7 @@ from bosshunter.collection_run_store import (
 	mark_orphaned_collection_runs_stopped,
 )
 from bosshunter.job_filters import (
+	city_base_name, city_match_clause, matching_blocked_company,
 	matches_hr_activity, parse_hr_active_days, parse_monthly_salary_k,
 	validate_hr_activity_config, validate_hr_activity_filter,
 )
@@ -243,9 +252,11 @@ def _serialize_history_items(items):
 	return serialized
 
 
-def _serialize_job(item):
-	"""Expose outsourcing evidence and greeting state in one API representation."""
+def _serialize_job(item, *, config=None):
+	"""Expose outsourcing, employment, and greeting state in one API representation."""
 	record = serialize_job(dict(item))
+	record["employment_type"] = classify_employment(record)
+	record["employment_review"] = internship_rejection(record, config if config is not None else load_config(CONFIG_PATH))
 	record["greeting_activity"] = greeting_activity.get(str(record.get("id") or ""))
 	record["hr_active_days"] = parse_hr_active_days(record.get("hr_active"))
 	raw_issues = record.get("greeting_style_issues")
@@ -1162,7 +1173,11 @@ def _score_trace_missing_state(job: dict) -> str:
 
 
 def _query_values(name: str) -> list[str]:
-	"""Read repeated query values while keeping the old single-value form valid."""
+	"""Read repeated query values while keeping the old single-value form valid.
+
+	``decode()`` is required: raw query values keep WSGI latin-1 bytes, so Chinese
+	filter values (学历、城市) would never match the database without it.
+	"""
 	values = request.query.decode().getall(name)
 	return [str(value).strip() for value in values if str(value).strip()]
 
@@ -1222,6 +1237,11 @@ def api_job_search():
 		placeholders = ",".join("?" for _ in source_platforms)
 		conditions.append(f"COALESCE(source_platform, 'boss') IN ({placeholders})")
 		params.extend(source_platforms)
+	city_filters = _query_values("city")
+	if city_filters:
+		city_clause, city_params = city_match_clause(city_filters)
+		conditions.append(city_clause)
+		params.extend(city_params)
 	if recruitment_types:
 		placeholders = ",".join("?" for _ in recruitment_types)
 		conditions.append(f"COALESCE(recruitment_type, 'unknown') IN ({placeholders})")
@@ -1256,10 +1276,26 @@ def api_job_search():
 	}
 	query += f" ORDER BY {sort_expressions[sort_by]} {sort_order.upper()}, created_at DESC, score DESC"
 
+	config = load_config(CONFIG_PATH)
+	blocked_companies = config.get("profile", {}).get("blocked_companies", [])
 	db = _get_web_db()
 	try:
-		all_total = db.execute("SELECT COUNT(*) FROM jobs WHERE deleted_at IS NULL").fetchone()[0]
+		city_options = sorted({
+			city_base_name(row[0]) for row in db.execute(
+				"SELECT DISTINCT city FROM jobs"
+				" WHERE deleted_at IS NULL AND TRIM(COALESCE(city, '')) <> ''"
+			).fetchall()
+		})
+		if blocked_companies:
+			all_total = sum(
+				matching_blocked_company(row["company"], blocked_companies) is None
+				for row in db.execute("SELECT company FROM jobs WHERE deleted_at IS NULL")
+			)
+		else:
+			all_total = db.execute("SELECT COUNT(*) FROM jobs WHERE deleted_at IS NULL").fetchone()[0]
 		rows = [dict(row) for row in db.execute(query, params).fetchall()]
+		if blocked_companies:
+			rows = [row for row in rows if matching_blocked_company(row.get("company", ""), blocked_companies) is None]
 		if salary_min is not None or salary_max is not None:
 			filtered_rows = []
 			for row in rows:
@@ -1276,9 +1312,10 @@ def api_job_search():
 		rows = [row for row in rows if matches_hr_activity(row.get("hr_active"), activity_filter)]
 		total = len(rows)
 		return _json_response({
-			"items": [_serialize_job(row) for row in rows[offset:offset + limit]],
+			"items": [_serialize_job(row, config=config) for row in rows[offset:offset + limit]],
 			"total": total,
 			"all_total": all_total,
+			"city_options": city_options,
 			"limit": limit,
 			"offset": offset,
 		})
@@ -2544,6 +2581,10 @@ def api_config_post():
 		if not isinstance(data, dict):
 			return _json_response({"error": "Config body must be an object"}, 400)
 		data = _sanitize_config_for_write(data)
+		try:
+			validate_config_send_windows(data)
+		except ValueError as exc:
+			return _json_response({"error": str(exc)}, 400)
 
 		# Basic validation
 		profile = data.get("profile", {})

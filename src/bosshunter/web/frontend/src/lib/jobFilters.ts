@@ -10,6 +10,7 @@ export interface JobFilters {
   createdWithin: string
   hrActiveWithin: string
   sourcePlatform: string[]
+  city: string[]
   education: string[]
   recruitmentType: string[]
   workSchedule: string
@@ -24,6 +25,7 @@ export const EMPTY_JOB_FILTERS: JobFilters = {
   createdWithin: '',
   hrActiveWithin: '',
   sourcePlatform: [],
+  city: [],
   education: [],
   recruitmentType: [],
   workSchedule: '',
@@ -47,6 +49,11 @@ export function hasInvalidSalaryRange(filters: JobFilters) {
 
 export function hasActiveJobFilters(filters: JobFilters) {
   return Object.values(filters).some(value => Array.isArray(value) ? value.length > 0 : value !== '')
+}
+
+/** Mirrors the backend: platform city labels look like 上海·浦东新区. */
+export function jobCityBaseName(city: string) {
+  return (city || '').split('·')[0].trim()
 }
 
 function parseMonthlySalaryK(salary: string): [number, number] | null {
@@ -113,8 +120,9 @@ export function filterJobs(jobs: Job[], filters: JobFilters) {
     if (minimumScore !== null && Number(job.score || 0) < minimumScore) return false
     if (filters.status.length > 0 && !filters.status.includes(job.status)) return false
     if (filters.sourcePlatform.length > 0 && !filters.sourcePlatform.includes(job.source_platform || 'boss')) return false
+    if (filters.city.length > 0 && !filters.city.includes(jobCityBaseName(job.city))) return false
     if (filters.recruitmentType.length > 0 && !filters.recruitmentType.includes(job.recruitment_type || 'unknown')) return false
-    if (filters.education.length > 0 && !filters.education.some(value => value === 'unknown' ? !job.education : (job.education || '').includes(value))) return false
+    if (filters.education.length > 0 && !filters.education.some(value => value === 'unknown' ? !(job.education || '').trim() : (job.education || '').includes(value))) return false
     if (filters.workSchedule && (job.work_schedule || 'unknown') !== filters.workSchedule) return false
     if (salaryEnabled) {
       const salaryRange = parseMonthlySalaryK(job.salary || '')
